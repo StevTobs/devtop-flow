@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { openExternalUrl } from "../lib/fileSystem";
 import { ApiKeyProvider, deleteApiKey, saveApiKey } from "../lib/secrets";
+import { useI18n } from "../lib/i18n";
 
 interface SettingsProps {
   hasKey: Record<ApiKeyProvider, boolean>;
@@ -50,6 +51,7 @@ export default function Settings({
   onClose,
   onKeysChanged,
 }: SettingsProps) {
+  const { t } = useI18n();
   const [drafts, setDrafts] = useState<Record<ApiKeyProvider, string>>({
     anthropic: "",
     openai: "",
@@ -104,32 +106,29 @@ export default function Settings({
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
-          <span>API Keys</span>
+          <span>{t("settings.title")}</span>
           <button className="text-btn" onClick={onClose}>
             ✕
           </button>
         </div>
         <div className="modal-body">
-          <p className="modal-hint">
-            Stored in the macOS Keychain — never written to a config file. Cloud models are the primary path; local
-            Ollama models need no key.
-          </p>
+          <p className="modal-hint">{t("settings.hint")}</p>
           {(Object.keys(PROVIDER_LABELS) as ApiKeyProvider[]).map((provider) => (
             <div key={provider} className="settings-row">
               <label>{PROVIDER_LABELS[provider]}</label>
               <div className="settings-row-input">
                 <input
                   type="password"
-                  placeholder={hasKey[provider] ? "•••••••••• (saved — enter a new key to replace)" : "Paste API key…"}
+                  placeholder={hasKey[provider] ? t("settings.savedPlaceholder") : t("settings.pastePlaceholder")}
                   value={drafts[provider]}
                   onChange={(e) => setDrafts((d) => ({ ...d, [provider]: e.target.value }))}
                 />
                 <button disabled={saving === provider || !drafts[provider].trim()} onClick={() => save(provider)}>
-                  Save
+                  {t("settings.save")}
                 </button>
                 {hasKey[provider] && (
                   <button className="danger" disabled={saving === provider} onClick={() => clear(provider)}>
-                    Clear
+                    {t("settings.clear")}
                   </button>
                 )}
               </div>
@@ -139,22 +138,22 @@ export default function Settings({
                   className="text-btn"
                   onClick={() => openExternalUrl(PROVIDER_SIGNUP_URL[provider]!)}
                 >
-                  Don't have a key? Sign in with Google or email →
+                  {t("settings.signIn")}
                 </button>
               )}
             </div>
           ))}
 
           <div className="settings-row">
-            <label>Ollama (local)</label>
+            <label>{t("settings.ollama")}</label>
             <div className="ollama-status">
               <span className={`ollama-status-dot ${ollamaRunning ? "running" : ollamaRunning === false ? "stopped" : ""}`} />
-              {ollamaRunning === null && "Checking…"}
-              {ollamaRunning === true && `Running at ${ollamaBaseUrl}`}
-              {ollamaRunning === false && `Not reachable at ${ollamaBaseUrl}`}
+              {ollamaRunning === null && t("settings.ollamaChecking")}
+              {ollamaRunning === true && t("settings.ollamaRunning", { url: ollamaBaseUrl })}
+              {ollamaRunning === false && t("settings.ollamaNotReachable", { url: ollamaBaseUrl })}
               {!hostEditing && (
                 <button type="button" className="text-btn" onClick={() => setHostEditing(true)}>
-                  Change host
+                  {t("settings.changeHost")}
                 </button>
               )}
             </div>
@@ -170,7 +169,7 @@ export default function Settings({
                     if (e.key === "Enter") saveHost();
                   }}
                 />
-                <button onClick={saveHost}>Save</button>
+                <button onClick={saveHost}>{t("settings.save")}</button>
               </div>
             )}
             {!manualEntry ? (
@@ -178,10 +177,10 @@ export default function Settings({
                 <select value={ollamaSelected} onChange={(e) => setOllamaSelected(e.target.value)}>
                   <option value="">
                     {detectedOllamaModels.length > 0
-                      ? "Select a pulled model…"
+                      ? t("settings.selectModel")
                       : ollamaRunning === false
-                      ? "Ollama not running"
-                      : "No models pulled yet"}
+                      ? t("settings.ollamaNotRunning")
+                      : t("settings.noModelsPulled")}
                   </option>
                   {detectedOllamaModels.map((model) => (
                     <option key={model} value={model}>
@@ -189,18 +188,18 @@ export default function Settings({
                     </option>
                   ))}
                 </select>
-                <button type="button" onClick={onRefreshOllamaModels} title="Re-scan Ollama for pulled models">
+                <button type="button" onClick={onRefreshOllamaModels} title={t("settings.refreshTitle")}>
                   ↻
                 </button>
                 <button disabled={!ollamaSelected} onClick={addOllamaModel}>
-                  Save
+                  {t("settings.save")}
                 </button>
               </div>
             ) : (
               <div className="settings-row-input">
                 <input
                   type="text"
-                  placeholder="Model Name — e.g. llama3.2"
+                  placeholder={t("settings.modelNamePlaceholder")}
                   value={ollamaDraft}
                   onChange={(e) => setOllamaDraft(e.target.value)}
                   onKeyDown={(e) => {
@@ -208,12 +207,12 @@ export default function Settings({
                   }}
                 />
                 <button disabled={!ollamaDraft.trim()} onClick={addOllamaModel}>
-                  Save
+                  {t("settings.save")}
                 </button>
               </div>
             )}
             <button className="text-btn ollama-manual-toggle" onClick={() => setManualEntry((v) => !v)}>
-              {manualEntry ? "← Choose from detected models instead" : "Model not listed? Type its name manually"}
+              {manualEntry ? t("settings.manualOn") : t("settings.manualOff")}
             </button>
             {ollamaModels.length > 0 && (
               <ul className="ollama-model-list">
@@ -221,7 +220,7 @@ export default function Settings({
                   <li key={model}>
                     <span>{model}</span>
                     <button className="danger" onClick={() => onRemoveOllamaModel(model)}>
-                      Clear
+                      {t("settings.clear")}
                     </button>
                   </li>
                 ))}

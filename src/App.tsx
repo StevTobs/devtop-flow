@@ -64,6 +64,8 @@ import {
   supervisorStopMessage,
 } from "./lib/taskSupervisor";
 import logo from "./assets/logo.png";
+import { useI18n } from "./lib/i18n";
+import { Theme, loadTheme, saveTheme } from "./lib/uiPrefs";
 
 const PROJECT_ROOT_KEY = "devtopflow.projectRoot";
 const ACTIVE_PROVIDER_KEY = "devtopflow.activeProviderId";
@@ -226,6 +228,23 @@ export default function App() {
     });
   };
   const [settingsOpen, setSettingsOpen] = useState(false);
+
+  // Appearance: theme applied via a data-theme attribute (styles.css keys its
+  // light-mode variable overrides off it) so plain CSS handles the repaint —
+  // no per-component theme prop threading needed. Language switching is a
+  // separate concern (lib/i18n.tsx's I18nProvider), read here only to hand
+  // Monaco/the editor pane whichever theme it should render its own chrome in.
+  const [theme, setTheme] = useState<Theme>(loadTheme);
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+  }, [theme]);
+  const toggleTheme = () => {
+    const next: Theme = theme === "dark" ? "light" : "dark";
+    setTheme(next);
+    saveTheme(next);
+  };
+  const { locale, setLocale, t } = useI18n();
+  const toggleLocale = () => setLocale(locale === "en" ? "th" : "en");
   // True for the entire task — every model turn, agentic read round trip,
   // and file-creation pass — not just the gap before the first token.
   const [isSending, setIsSending] = useState(false);
@@ -1172,10 +1191,24 @@ export default function App() {
           DevTop Flow
         </div>
         <div className="titlebar-actions">
-          <button className="titlebar-action" onClick={() => setAgentSettingsOpen(true)} title="Agent Settings…">
+          <button
+            className="titlebar-action"
+            onClick={toggleLocale}
+            title={t("titlebar.language")}
+          >
+            {locale === "en" ? "EN" : "ไทย"}
+          </button>
+          <button
+            className="titlebar-action"
+            onClick={toggleTheme}
+            title={theme === "dark" ? t("titlebar.lightMode") : t("titlebar.darkMode")}
+          >
+            {theme === "dark" ? "🌙" : "☀️"}
+          </button>
+          <button className="titlebar-action" onClick={() => setAgentSettingsOpen(true)} title={t("titlebar.agentSettings")}>
             🎛
           </button>
-          <button className="titlebar-action" onClick={() => setSettingsOpen(true)} title="API Keys…">
+          <button className="titlebar-action" onClick={() => setSettingsOpen(true)} title={t("titlebar.apiKeys")}>
             ⚙
           </button>
         </div>
@@ -1198,6 +1231,7 @@ export default function App() {
           language={openPath ? languageFromPath(openPath) : "plaintext"}
           value={editorValue}
           imageSrc={activeTab?.imageSrc}
+          theme={theme}
           onSelectTab={setActiveTabPath}
           onCloseTab={closeTab}
           onChange={(v) =>
@@ -1277,16 +1311,16 @@ export default function App() {
                 : ""
             }`}
             onClick={() => setBudgetPanelOpen((v) => !v)}
-            title="Budget monitor — total spend across every folder and chat"
+            title={t("statusbar.budgetTooltip")}
           >
             💰 ${budget.totalUsd.toFixed(4)}
             {budget.limitUsd > 0 ? ` / $${budget.limitUsd.toFixed(2)}` : ""}
           </button>
-          <button className="text-btn" onClick={() => setSidebarCollapsed((v) => !v)} title="Toggle sidebar">
-            {sidebarCollapsed ? "▸ Sidebar" : "▪ Sidebar"}
+          <button className="text-btn" onClick={() => setSidebarCollapsed((v) => !v)} title={t("statusbar.toggleSidebar")}>
+            {sidebarCollapsed ? t("statusbar.sidebarHidden") : t("statusbar.sidebarShown")}
           </button>
-          <button className="text-btn" onClick={() => setChatCollapsed((v) => !v)} title="Toggle chat panel">
-            {chatCollapsed ? "Chat ◂" : "Chat ▪"}
+          <button className="text-btn" onClick={() => setChatCollapsed((v) => !v)} title={t("statusbar.toggleChat")}>
+            {chatCollapsed ? t("statusbar.chatHidden") : t("statusbar.chatShown")}
           </button>
           <button
             className="text-btn"

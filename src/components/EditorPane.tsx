@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import Editor, { loader, OnMount } from "@monaco-editor/react";
 import { svgTextToDataUrl } from "../lib/fileSystem";
 import { buildHtmlPreviewDoc } from "../lib/htmlPreview";
+import { useI18n } from "../lib/i18n";
+import type { Theme } from "../lib/uiPrefs";
 
 // @monaco-editor/react defaults to loading Monaco's AMD bundle from
 // cdn.jsdelivr.net via an injected <script> tag — blocked outright by the
@@ -33,13 +35,16 @@ interface EditorPaneProps {
   value: string;
   /** Set for raster images (jpg/png/gif/…) — a view-only image tab, no Monaco. */
   imageSrc?: string;
+  theme: Theme;
   onSelectTab: (path: string) => void;
   onCloseTab: (path: string) => void;
   onChange: (value: string | undefined) => void;
   onSelectionChange?: (selectedText: string) => void;
 }
 
-// DevTop Flow custom Monaco theme, tuned to the brand palette
+// DevTop Flow custom Monaco themes, tuned to the brand palette in each mode —
+// the app's own light/dark toggle (App.tsx) wouldn't otherwise reach Monaco,
+// which manages its own theme independent of surrounding CSS.
 const defineBrandTheme = (monaco: any) => {
   monaco.editor.defineTheme("devtop-flow-dark", {
     base: "vs-dark",
@@ -59,6 +64,24 @@ const defineBrandTheme = (monaco: any) => {
       "editor.selectionBackground": "#401c7566",
     },
   });
+  monaco.editor.defineTheme("devtop-flow-light", {
+    base: "vs",
+    inherit: true,
+    rules: [
+      { token: "comment", foreground: "6b7a1f", fontStyle: "italic" },
+      { token: "keyword", foreground: "7c4dbd" },
+      { token: "string", foreground: "5c6b16" },
+      { token: "number", foreground: "9c3fa8" },
+    ],
+    colors: {
+      "editor.background": "#eceef2",
+      "editor.foreground": "#201e29",
+      "editorCursor.foreground": "#7c4dbd",
+      "editor.lineHighlightBackground": "#e1e3ea",
+      "editorLineNumber.foreground": "#8a869a",
+      "editor.selectionBackground": "#7c4dbd33",
+    },
+  });
 };
 
 export default function EditorPane({
@@ -67,11 +90,13 @@ export default function EditorPane({
   language,
   value,
   imageSrc,
+  theme,
   onSelectTab,
   onCloseTab,
   onChange,
   onSelectionChange,
 }: EditorPaneProps) {
+  const { t } = useI18n();
   const [showPreview, setShowPreview] = useState(true);
   const [codeHidden, setCodeHidden] = useState(false);
   const [tabsHidden, setTabsHidden] = useState(false);
@@ -122,7 +147,7 @@ export default function EditorPane({
     return (
       <div className="tabs-empty">
         <div className="empty-hint" style={{ margin: "auto", cursor: "default" }}>
-          Open a file from the Explorer to start editing.
+          {t("editor.openHint")}
         </div>
       </div>
     );
@@ -132,9 +157,9 @@ export default function EditorPane({
     <div className="tabs-row">
       {tabsHidden ? (
         <div className="tabs-hidden-hint">
-          {tabs.find((t) => t.path === activeTabPath)?.relativePath}
-          {tabs.find((t) => t.path === activeTabPath)?.dirty && (
-            <span className="tab-dirty" title="Unsaved changes">
+          {tabs.find((tab) => tab.path === activeTabPath)?.relativePath}
+          {tabs.find((tab) => tab.path === activeTabPath)?.dirty && (
+            <span className="tab-dirty" title={t("editor.unsavedChanges")}>
               {" "}
               *
             </span>
@@ -142,25 +167,25 @@ export default function EditorPane({
         </div>
       ) : (
         <div className="tabs">
-          {tabs.map((t) => (
+          {tabs.map((tab) => (
             <div
-              key={t.path}
-              className={`tab ${t.path === activeTabPath ? "active" : ""}`}
-              onClick={() => onSelectTab(t.path)}
-              title={t.relativePath}
+              key={tab.path}
+              className={`tab ${tab.path === activeTabPath ? "active" : ""}`}
+              onClick={() => onSelectTab(tab.path)}
+              title={tab.relativePath}
             >
-              <span className="tab-label">{t.relativePath}</span>
-              {t.dirty && (
-                <span className="tab-dirty" title="Unsaved changes">
+              <span className="tab-label">{tab.relativePath}</span>
+              {tab.dirty && (
+                <span className="tab-dirty" title={t("editor.unsavedChanges")}>
                   *
                 </span>
               )}
               <button
                 className="tab-close"
-                title="Close"
+                title={t("editor.close")}
                 onClick={(e) => {
                   e.stopPropagation();
-                  onCloseTab(t.path);
+                  onCloseTab(tab.path);
                 }}
               >
                 ✕
@@ -172,12 +197,12 @@ export default function EditorPane({
       <div className="tabs-row-actions">
         {previewable && (
           <>
-            <button className="text-btn" onClick={() => setShowPreview((v) => !v)} title="Toggle preview">
-              {showPreview ? "🖥 Hide preview" : "🖥 Preview"}
+            <button className="text-btn" onClick={() => setShowPreview((v) => !v)} title={t("editor.togglePreviewTitle")}>
+              {showPreview ? t("editor.hidePreview") : t("editor.showPreview")}
             </button>
             {showPreview && (
-              <button className="text-btn" onClick={() => setCodeHidden((v) => !v)} title="Expand preview, hiding the code">
-                {codeHidden ? "⛶ Show code" : "⛶ Expand preview"}
+              <button className="text-btn" onClick={() => setCodeHidden((v) => !v)} title={t("editor.expandPreviewTitle")}>
+                {codeHidden ? t("editor.showCode") : t("editor.expandPreview")}
               </button>
             )}
           </>
@@ -185,9 +210,9 @@ export default function EditorPane({
         <button
           className="text-btn"
           onClick={() => setTabsHidden((v) => !v)}
-          title={tabsHidden ? "Show tabs" : "Hide tabs"}
+          title={tabsHidden ? t("editor.tabsShowTitle") : t("editor.tabsTitle")}
         >
-          {tabsHidden ? "▾ Tabs" : "▴ Hide tabs"}
+          {tabsHidden ? t("editor.showTabs") : t("editor.hideTabs")}
         </button>
       </div>
     </div>
@@ -198,7 +223,7 @@ export default function EditorPane({
       <div className="editor-pane">
         {tabBar}
         <div className="image-viewer">
-          <img src={imageSrc} alt={tabs.find((t) => t.path === activeTabPath)?.relativePath ?? ""} />
+          <img src={imageSrc} alt={tabs.find((tab) => tab.path === activeTabPath)?.relativePath ?? ""} />
         </div>
       </div>
     );
@@ -212,7 +237,7 @@ export default function EditorPane({
           <div className="monaco-wrapper">
             <Editor
               height="calc(100vh - 44px - 36px - 22px)"
-              theme="devtop-flow-dark"
+              theme={theme === "light" ? "devtop-flow-light" : "devtop-flow-dark"}
               language={language}
               value={value}
               onChange={onChange}

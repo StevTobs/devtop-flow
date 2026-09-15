@@ -1,5 +1,6 @@
 import { useState, type MouseEvent } from "react";
 import { FileEntry, fileIconFor, listDir, parentDir, revealInFileExplorer } from "../lib/fileSystem";
+import { useI18n } from "../lib/i18n";
 
 interface TreeNodeProps {
   entry: FileEntry;
@@ -11,6 +12,7 @@ interface TreeNodeProps {
 }
 
 function TreeNode({ entry, depth, activePath, onOpenFile, onCreateFile, onContextMenu }: TreeNodeProps) {
+  const { t } = useI18n();
   const [expanded, setExpanded] = useState(false);
   const [children, setChildren] = useState<FileEntry[] | undefined>();
   const [loading, setLoading] = useState(false);
@@ -92,7 +94,7 @@ function TreeNode({ entry, depth, activePath, onOpenFile, onCreateFile, onContex
           {entry.name}
           {loading ? " …" : ""}
         </span>
-        <button className="file-item-action" title="New File…" onClick={startCreate}>
+        <button className="file-item-action" title={t("sidebar.newFile")} onClick={startCreate}>
           📄
         </button>
       </div>
@@ -101,7 +103,7 @@ function TreeNode({ entry, depth, activePath, onOpenFile, onCreateFile, onContex
           className="new-file-input"
           style={{ marginLeft: 8 + (depth + 1) * 14 }}
           autoFocus
-          placeholder="filename.ext"
+          placeholder={t("sidebar.filenamePlaceholder")}
           value={draftName}
           onChange={(e) => setDraftName(e.target.value)}
           onClick={(e) => e.stopPropagation()}
@@ -147,6 +149,7 @@ export default function Sidebar({
   onOpenFile,
   onCreateFile,
 }: SidebarProps) {
+  const { t } = useI18n();
   const projectName = projectRoot?.split(/[\\/]/).filter(Boolean).pop();
   const [creatingAtRoot, setCreatingAtRoot] = useState(false);
   const [rootDraftName, setRootDraftName] = useState("");
@@ -176,7 +179,7 @@ export default function Sidebar({
               openContextMenu(projectRoot, true, e.clientX, e.clientY);
             }}
           >
-            {projectName ? `Explorer — ${projectName}` : "Explorer"}
+            {projectName ? t("sidebar.explorerNamed", { name: projectName }) : t("sidebar.explorer")}
           </span>
           <span>
             {projectRoot && (
@@ -187,16 +190,16 @@ export default function Sidebar({
                     setCreatingAtRoot(true);
                     setRootDraftName("");
                   }}
-                  title="New File…"
+                  title={t("sidebar.newFile")}
                 >
                   📄
                 </button>
-                <button className="text-btn" onClick={onRefresh} title="Refresh">
+                <button className="text-btn" onClick={onRefresh} title={t("sidebar.refresh")}>
                   ⟲
                 </button>
               </>
             )}
-            <button className="text-btn" onClick={onOpenFolder} title="Open Folder…">
+            <button className="text-btn" onClick={onOpenFolder} title={t("sidebar.openFolder")}>
               ＋
             </button>
           </span>
@@ -204,7 +207,7 @@ export default function Sidebar({
 
         {!projectRoot && (
           <div className="empty-hint" onClick={onOpenFolder}>
-            Open a folder to start editing — DevTop Flow can only create/edit files inside a folder you've opened.
+            {t("sidebar.emptyHint")}
           </div>
         )}
 
@@ -213,7 +216,7 @@ export default function Sidebar({
             className="new-file-input"
             style={{ marginLeft: 8 }}
             autoFocus
-            placeholder="filename.ext"
+            placeholder={t("sidebar.filenamePlaceholder")}
             value={rootDraftName}
             onChange={(e) => setRootDraftName(e.target.value)}
             onKeyDown={(e) => {
@@ -248,7 +251,7 @@ export default function Sidebar({
                 closeContextMenu();
               }}
             >
-              Reveal in File Explorer
+              {t("sidebar.revealInExplorer")}
             </button>
           </div>
         </>

@@ -11,7 +11,23 @@
   --dtf-text: #f2e6df;
   --dtf-text-dim: #a89fb0;
   --dtf-mono: "SF Mono", "JetBrains Mono", ui-monospace, monospace;
-  --dtf-sans: -apple-system, "SF Pro Text", "Inter", sans-serif;
+  --dtf-sans: -apple-system, "SF Pro Text", "Inter", "Noto Sans Thai", sans-serif;
+}
+
+/* Light mode — a soft gray, not stark white, so the same panel hierarchy the
+   dark theme uses (bg → surface → surface-raised getting progressively more
+   distinct) still reads clearly instead of washing out to flat white. */
+:root[data-theme="light"] {
+  --dtf-bg: #eceef2;
+  --dtf-surface: #e1e3ea;
+  --dtf-surface-raised: #d5d8e1;
+  --dtf-border: #c2c6d1;
+  --dtf-primary: #7c4dbd;
+  --dtf-primary-hover: #6d3fa8;
+  --dtf-deep-violet: #401c75;
+  --dtf-accent-green: #63711d;
+  --dtf-text: #201e29;
+  --dtf-text-dim: #5a5568;
 }
 
 * {
@@ -27,6 +43,12 @@ html, body, #root {
 }
 
 .app-shell {
+  /* A uniform "browser zoom"-style bump — most of this stylesheet sets
+     absolute px font-sizes rather than rem, so scaling the root font-size
+     alone wouldn't cascade to them; zoom scales the whole rendered tree
+     (text, icons, padding) together instead of just enlarging text and
+     leaving spacing stale. */
+  zoom: 1.08;
   display: grid;
   grid-template-columns: 240px 1fr 320px;
   grid-template-rows: 44px 1fr 22px;
@@ -204,7 +226,7 @@ html, body, #root {
   /* Left column clears macOS's traffic-light window controls, which float
      over the content when titleBarStyle is "Overlay" (build plan §9). The
      right column mirrors it so the center column is truly centered. */
-  grid-template-columns: 108px 1fr 108px;
+  grid-template-columns: 160px 1fr 160px;
   align-items: center;
   background: var(--dtf-surface);
   border-bottom: 1px solid var(--dtf-border);
@@ -244,10 +266,12 @@ html, body, #root {
   border: 1px solid var(--dtf-border);
   color: var(--dtf-text-dim);
   border-radius: 6px;
-  width: 24px;
+  min-width: 24px;
   height: 24px;
+  padding: 0 5px;
   font-size: 13px;
   cursor: pointer;
+  white-space: nowrap;
 }
 
 .titlebar-action:hover {

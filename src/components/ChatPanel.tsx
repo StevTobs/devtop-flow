@@ -3,6 +3,7 @@ import { ChatMessage, ModelProvider } from "../lib/modelProvider";
 import { buildFileTree } from "../lib/fileSystem";
 import { ATTACHMENT_PREFIX, attachmentSummaryLine } from "../lib/contextBuilder";
 import { AgentPhase } from "../lib/taskSupervisor";
+import { useI18n, type TranslationKey } from "../lib/i18n";
 
 export interface SessionSummary {
   id: string;
@@ -22,11 +23,18 @@ const INLINE_CODE = /`([^`\n]+)`/g;
 // body straight into the bubble).
 const DIRECTIVE_BLOCK = /```devtopflow:(file|read|image|draw)([^\n]*)\n([\s\S]*?)(?:```|$)/g;
 
-const DIRECTIVE_META: Record<string, { icon: string; verb: string }> = {
-  file: { icon: "📄", verb: "Writing" },
-  read: { icon: "🔍", verb: "Reading" },
-  image: { icon: "🎨", verb: "Generating" },
-  draw: { icon: "🖌", verb: "Drawing" },
+const DIRECTIVE_ICON: Record<string, string> = {
+  file: "📄",
+  read: "🔍",
+  image: "🎨",
+  draw: "🖌",
+};
+
+const DIRECTIVE_VERB_KEY: Record<string, TranslationKey> = {
+  file: "directive.file",
+  read: "directive.read",
+  image: "directive.image",
+  draw: "directive.draw",
 };
 
 /** Renders `single-backtick` spans within plain text as inline code pills. */
@@ -49,21 +57,22 @@ function renderInline(text: string, keyPrefix: string): (string | JSX.Element)[]
   return nodes;
 }
 
-const PHASE_LABELS: Record<AgentPhase, string> = {
-  idle: "",
-  parsing: "PARSING CONTEXT",
-  waiting: "SYNCHRONIZING",
-  streaming: "PROCESSING",
-  applying: "APPLYING CHANGES",
-  finalizing: "FINALIZING",
-  stalled: "⚠ NO RESPONSE — STALLED",
+const PHASE_LABEL_KEY: Record<AgentPhase, TranslationKey> = {
+  idle: "phase.idle",
+  parsing: "phase.parsing",
+  waiting: "phase.waiting",
+  streaming: "phase.streaming",
+  applying: "phase.applying",
+  finalizing: "phase.finalizing",
+  stalled: "phase.stalled",
 };
 
 /** NERV-terminal-style "thinking" readout — flickering text + scanline, driven by the real task phase (agent-control-panel-prompt.md §3) instead of an arbitrary cosmetic cycle. */
 function ThinkingReadout({ phase }: { phase: AgentPhase }) {
+  const { t } = useI18n();
   return (
     <span className={`thinking-eva ${phase === "stalled" ? "thinking-eva-stalled" : ""}`} aria-label="Thinking">
-      <span className="thinking-eva-text">{PHASE_LABELS[phase] || "SYNCHRONIZING"}</span>
+      <span className="thinking-eva-text">{t(PHASE_LABEL_KEY[phase]) || t("phase.waiting")}</span>
       <span className="thinking-eva-cursor">▊</span>
       <span className="thinking-eva-scan" />
     </span>
@@ -79,6 +88,7 @@ function ThinkingReadout({ phase }: { phase: AgentPhase }) {
  * phase.
  */
 function TaskTimer({ isSending, phase, progress }: { isSending: boolean; phase: AgentPhase; progress: number }) {
+  const { t } = useI18n();
   const [elapsedMs, setElapsedMs] = useState(0);
   const startRef = useRef(0);
 
@@ -102,7 +112,7 @@ function TaskTimer({ isSending, phase, progress }: { isSending: boolean; phase: 
   return (
     <span
       className={`task-timer ${phase === "stalled" ? "task-timer-stalled" : ""}`}
-      title={`${PHASE_LABELS[phase] || "Working"} — running for ${Math.floor(seconds)}s`}
+      title={`${t(PHASE_LABEL_KEY[phase]) || "Working"} — running for ${Math.floor(seconds)}s`}
     >
       <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
         <circle className="task-timer-track" cx={size / 2} cy={size / 2} r={radius} strokeWidth={strokeWidth} fill="none" />
@@ -132,7 +142,7 @@ function TaskTimer({ isSending, phase, progress }: { isSending: boolean; phase: 
  * it, so two elements can never end up with the same key regardless of how
  * many directive/text segments the message happens to split into.
  */
-function renderTextWithCode(content: string, nextKey: () => number): JSX.Element[] {
+function renderTextWithCode(content: string, nextKey: () => number, copyLabel: string): JSX.Element[] {
   const parts: JSX.Element[] = [];
   let lastIndex = 0;
   let match: RegExpExecArray | null;
@@ -149,7 +159,7 @@ function renderTextWithCode(content: string, nextKey: () => number): JSX.Element
         <div className="code-block-header">
           <span>{lang}</span>
           <button className="code-block-copy" onClick={() => navigator.clipboard.writeText(code)}>
-            Copy
+            {copyLabel}
           </button>
         </div>
         <pre>
@@ -175,27 +185,30 @@ function renderTextWithCode(content: string, nextKey: () => number): JSX.Element
  * the "✅ Created" summary even showed up).
  */
 function MessageContent({ content }: { content: string }) {
+  const { t } = useI18n();
   const parts: JSX.Element[] = [];
   let lastIndex = 0;
   let n = 0;
   const nextKey = () => n++;
+  const copyLabel = t("chat.copy");
   let match: RegExpExecArray | null;
   DIRECTIVE_BLOCK.lastIndex = 0;
   while ((match = DIRECTIVE_BLOCK.exec(content)) !== null) {
     if (match.index > lastIndex) {
-      parts.push(...renderTextWithCode(content.slice(lastIndex, match.index), nextKey));
+      parts.push(...renderTextWithCode(content.slice(lastIndex, match.index), nextKey, copyLabel));
     }
-    const meta = DIRECTIVE_META[match[1]] ?? { icon: "⚙️", verb: "Working on" };
+    const icon = DIRECTIVE_ICON[match[1]] ?? "⚙️";
+    const verb = t(DIRECTIVE_VERB_KEY[match[1]] ?? "directive.fallback");
     const path = /path="([^"]*)"/.exec(match[2])?.[1] ?? "file";
     parts.push(
       <div className="directive-chip" key={nextKey()}>
-        {meta.icon} {meta.verb} <code className="inline-code">{path}</code>…
+        {icon} {verb} <code className="inline-code">{path}</code>…
       </div>
     );
     lastIndex = DIRECTIVE_BLOCK.lastIndex;
   }
   if (lastIndex < content.length) {
-    parts.push(...renderTextWithCode(content.slice(lastIndex), nextKey));
+    parts.push(...renderTextWithCode(content.slice(lastIndex), nextKey, copyLabel));
   }
   return <>{parts}</>;
 }
@@ -261,6 +274,7 @@ export default function ChatPanel({
   onResumeAnyway,
   onDismissWarning,
 }: ChatPanelProps) {
+  const { t } = useI18n();
   const [draft, setDraft] = useState("");
   const [historyOpen, setHistoryOpen] = useState(false);
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
@@ -399,24 +413,20 @@ export default function ChatPanel({
   return (
     <div className="chat-panel">
       <div className="chat-header">
-        <button className="text-btn" onClick={() => setHistoryOpen((v) => !v)} title="Chat history">
-          🕘 {sessions.length > 1 ? `${sessions.length} chats` : "History"}
+        <button className="text-btn" onClick={() => setHistoryOpen((v) => !v)} title={t("chat.historyTitle")}>
+          🕘 {sessions.length > 1 ? t("chat.historyMulti", { n: sessions.length }) : t("chat.historySingle")}
         </button>
-        <span className="session-cost" title="Total for this chat (USD / THB)">
+        <span className="session-cost" title={t("chat.sessionCostTooltip")}>
           {sessionCost && sessionCost.usd > 0 && `$${sessionCost.usd.toFixed(4)} · ฿${sessionCost.thb.toFixed(2)}`}
         </span>
         <TaskTimer isSending={isSending} phase={agentPhase} progress={agentProgress} />
         {isSending && (
-          <button
-            className="text-btn stop-btn"
-            onClick={onStop}
-            title="Force-stop everything the agent is doing right now — click here, type @stop, press Esc, or ⌘C anywhere in the app"
-          >
-            ⏹ Stop <span className="kbd-inline">@stop</span> <span className="kbd-inline">Esc</span> <span className="kbd-inline">⌘C</span>
+          <button className="text-btn stop-btn" onClick={onStop} title={t("chat.stopTitle")}>
+            {t("chat.stop")} <span className="kbd-inline">@stop</span> <span className="kbd-inline">Esc</span> <span className="kbd-inline">⌘C</span>
           </button>
         )}
-        <button className="text-btn" onClick={onNewChat} title="New chat (keeps this one in history)">
-          ＋ New
+        <button className="text-btn" onClick={onNewChat} title={t("chat.newChatTitle")}>
+          {t("chat.newChat")}
         </button>
       </div>
 
@@ -424,7 +434,7 @@ export default function ChatPanel({
         <div className="supervisor-warning">
           <span>{supervisorWarningText}</span>
           <button className="text-btn" onClick={onResumeAnyway}>
-            🔁 Resume anyway
+            {t("chat.resumeAnyway")}
           </button>
           <button className="text-btn" onClick={onDismissWarning}>
             ✕
@@ -449,7 +459,7 @@ export default function ChatPanel({
               </span>
               <button
                 className="tab-close"
-                title="Delete this chat"
+                title={t("chat.deleteChatTitle")}
                 onClick={() => onDeleteSession(s.id)}
               >
                 🗑
@@ -464,17 +474,17 @@ export default function ChatPanel({
           {pendingAttachments.map((label, i) => (
             <div className="context-chip" key={i}>
               📎 {label}
-              <button className="context-chip-remove" title="Remove attachment" onClick={() => onRemoveAttachment(i)}>
+              <button className="context-chip-remove" title={t("chat.removeAttachment")} onClick={() => onRemoveAttachment(i)}>
                 ✕
               </button>
             </div>
           ))}
         </div>
       )}
-      {!!estimatedTokens && <div className="cost-chip">Est. ~{estimatedTokens} input tokens</div>}
+      {!!estimatedTokens && <div className="cost-chip">{t("chat.estTokens", { n: estimatedTokens })}</div>}
       {overContextLimit && (
-        <div className="cost-chip over-limit" title="Over the context window limit set in Agent Settings">
-          ⚠ Over context limit ({contextLimit?.toLocaleString()} tokens)
+        <div className="cost-chip over-limit" title={t("chat.overContextLimitTooltip")}>
+          {t("chat.overContextLimit", { limit: contextLimit?.toLocaleString() ?? "" })}
         </div>
       )}
 
@@ -512,8 +522,8 @@ export default function ChatPanel({
       <div className="chat-input">
         <div className="chat-input-toolbar">
           <span className="attach-menu-wrap">
-            <button className="text-btn" onClick={() => setAttachMenuOpen((v) => !v)} title="Attach a file to this message">
-              📎 Attach
+            <button className="text-btn" onClick={() => setAttachMenuOpen((v) => !v)} title={t("chat.attachTitle")}>
+              {t("chat.attach")}
             </button>
             {attachMenuOpen && (
               <div className="attach-menu">
@@ -524,7 +534,7 @@ export default function ChatPanel({
                     setAttachMenuOpen(false);
                   }}
                 >
-                  📄 Active file / selection
+                  {t("chat.attachActiveFile")}
                 </button>
                 <button
                   className="attach-menu-item"
@@ -533,7 +543,7 @@ export default function ChatPanel({
                     setAttachMenuOpen(false);
                   }}
                 >
-                  📂 Browse for files…
+                  {t("chat.attachBrowse")}
                 </button>
               </div>
             )}
@@ -543,9 +553,9 @@ export default function ChatPanel({
             value={activeProviderId ?? ""}
             onChange={(e) => onSelectProvider(e.target.value)}
             disabled={providers.length === 0}
-            title="Model"
+            title={t("chat.modelTooltip")}
           >
-            {providers.length === 0 && <option value="">No model configured</option>}
+            {providers.length === 0 && <option value="">{t("chat.noModelConfigured")}</option>}
             {providers.map((p) => (
               <option key={p.id} value={p.id}>
                 {p.kind === "local" ? "🖥️ " : "☁️ "}
@@ -557,22 +567,22 @@ export default function ChatPanel({
             <button
               className={`text-btn see-chip ${projectRoot ? "" : "see-chip-off"}`}
               onClick={toggleSee}
-              title="Verify exactly what the agent can currently see"
+              title={t("chat.seeTitle")}
             >
-              👁 @see
+              {t("chat.see")}
             </button>
             {seeOpen && (
               <div className="see-panel see-panel-right">
                 {!projectRoot ? (
-                  <div className="see-panel-empty">No folder open — the agent can't see any files right now.</div>
+                  <div className="see-panel-empty">{t("chat.seeEmptyNoFolder")}</div>
                 ) : seeLoading ? (
-                  <div className="see-panel-empty">Reading…</div>
+                  <div className="see-panel-empty">{t("chat.seeLoading")}</div>
                 ) : (
                   <>
                     <div className="see-panel-title" title={projectRoot}>
                       {projectRoot}
                     </div>
-                    <pre className="see-panel-tree">{seeTree || "(empty folder)"}</pre>
+                    <pre className="see-panel-tree">{seeTree || t("chat.seeEmptyFolder")}</pre>
                   </>
                 )}
               </div>
@@ -583,11 +593,7 @@ export default function ChatPanel({
           ref={textareaRef}
           className="chat-textarea"
           rows={3}
-          placeholder={
-            isSending
-              ? "Type @stop, press Esc, or ⌘C to force-stop the agent…"
-              : "Ask DevTop Flow to explain, refactor, or scaffold something… (⌘V to paste an image, ↑ to recall previous messages)"
-          }
+          placeholder={isSending ? t("chat.placeholderSending") : t("chat.placeholderIdle")}
           value={draft}
           onChange={(e) => {
             setDraft(e.target.value);
