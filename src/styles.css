@@ -34,6 +34,19 @@
   box-sizing: border-box;
 }
 
+html {
+  /* A uniform "browser zoom"-style bump — most of this stylesheet sets
+     absolute px font-sizes rather than rem, so scaling the root font-size
+     alone wouldn't cascade to them; zoom scales the whole rendered tree
+     (text, icons, padding) together instead of just enlarging text and
+     leaving spacing stale. Applied on the root element specifically — here
+     (unlike on a descendant such as .app-shell) the browser rescales the
+     effective viewport along with it, so 100vh/100% sizing below still
+     exactly fills the real window instead of overflowing past it and
+     forcing a scrollbar when maximized. */
+  zoom: 1.08;
+}
+
 html, body, #root {
   height: 100%;
   margin: 0;
@@ -43,16 +56,10 @@ html, body, #root {
 }
 
 .app-shell {
-  /* A uniform "browser zoom"-style bump — most of this stylesheet sets
-     absolute px font-sizes rather than rem, so scaling the root font-size
-     alone wouldn't cascade to them; zoom scales the whole rendered tree
-     (text, icons, padding) together instead of just enlarging text and
-     leaving spacing stale. */
-  zoom: 1.08;
   display: grid;
   grid-template-columns: 240px 1fr 320px;
   grid-template-rows: 44px 1fr 22px;
-  height: 100vh;
+  height: 100%;
   position: relative;
 }
 
@@ -961,6 +968,21 @@ html, body, #root {
 
 /* --- chat header / model select / chips --- */
 
+/* The dropdown list a native <select> opens is a separate OS-drawn surface —
+   it doesn't reliably pick up the closed control's `background`/`color`, so
+   without explicit `option` colors it can render as dark text on a dark
+   background (or the reverse) depending on the OS/webview's own defaults.
+   Pairing background+color directly on `option` is what Chromium/WebView2
+   actually honors for the popup's row content. Applies to every themed
+   <select> in the app so this can't regress somewhere else later. */
+.model-select option,
+.model-select-compact option,
+.settings-row-input select option,
+.agent-settings-select option {
+  background: var(--dtf-surface-raised);
+  color: var(--dtf-text);
+}
+
 .model-select {
   flex: 1;
   background: var(--dtf-surface-raised);
@@ -972,9 +994,11 @@ html, body, #root {
 }
 
 /* Tucked into the bottom-right of the input toolbar, not the header — small
-   and out of the way, in the style of Cursor/ChatGPT model pickers. */
+   and out of the way, in the style of Cursor/ChatGPT model pickers. Solid
+   (not transparent) so its closed box doesn't blend into whatever's behind
+   it and look like it belongs to a different, undertyled control. */
 .model-select-compact {
-  background: transparent;
+  background: var(--dtf-surface);
   color: var(--dtf-text-dim);
   border: 1px solid var(--dtf-border);
   border-radius: 6px;
