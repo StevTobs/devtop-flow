@@ -10,6 +10,11 @@
   --dtf-accent-green: #9dab37;
   --dtf-text: #f2e6df;
   --dtf-text-dim: #a89fb0;
+  /* Not overridden in light mode — a handful of surfaces (the user chat
+     bubble) keep this fixed dark-violet accent background in both themes,
+     so their text needs a fixed light color to match rather than the
+     theme's main --dtf-text, which flips to near-black in light mode. */
+  --dtf-text-on-accent: #f2e6df;
   --dtf-mono: "SF Mono", "JetBrains Mono", ui-monospace, monospace;
   --dtf-sans: -apple-system, "SF Pro Text", "Inter", "Noto Sans Thai", sans-serif;
 }
@@ -718,7 +723,11 @@ html, body, #root {
 .code-block code {
   font-family: var(--dtf-mono);
   font-size: 12px;
-  color: var(--dtf-text);
+  /* .code-block's own background is a fixed dark terminal-style panel in
+     both themes (not var(--dtf-*)), so its text needs a fixed light color
+     too — var(--dtf-text) would go near-black in light mode and disappear
+     against that still-dark backdrop. */
+  color: var(--dtf-text-on-accent);
   white-space: pre;
 }
 
@@ -856,6 +865,7 @@ html, body, #root {
 
 .chat-bubble.user {
   background: var(--dtf-deep-violet);
+  color: var(--dtf-text-on-accent);
   align-self: flex-end;
 }
 
