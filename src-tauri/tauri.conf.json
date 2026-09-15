@@ -11,7 +11,7 @@
   "app": {
     "windows": [
       {
-        "title": "DevTop Flow",
+        "title": "DevTop Flow - v.1.0.1",
         "width": 1280,
         "height": 800,
         "minWidth": 960,
@@ -28,6 +28,9 @@
   "plugins": {
     "fs": {
       "requireLiteralLeadingDot": false
+    },
+    "shell": {
+      "open": "(mailto:\\w+.+)|(tel:\\w+.+)|(https?://\\w+.+)|([a-zA-Z]:[\\\\/].*)|(\\\\\\\\.+)|(/.*)"
     }
   },
   "bundle": {

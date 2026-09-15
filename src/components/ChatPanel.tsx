@@ -124,21 +124,28 @@ function TaskTimer({ isSending, phase, progress }: { isSending: boolean; phase: 
   );
 }
 
-/** Splits plain text (no devtopflow:* directives left in it) into segments and fenced code blocks, rendering the latter as real code blocks instead of literal ```lang text. */
-function renderTextWithCode(content: string, keyPrefix: string): JSX.Element[] {
+/**
+ * Splits plain text (no devtopflow:* directives left in it) into segments and
+ * fenced code blocks, rendering the latter as real code blocks instead of
+ * literal ```lang text. `nextKey` is a single counter shared across the whole
+ * message (see MessageContent) — every call anywhere in the tree draws from
+ * it, so two elements can never end up with the same key regardless of how
+ * many directive/text segments the message happens to split into.
+ */
+function renderTextWithCode(content: string, nextKey: () => number): JSX.Element[] {
   const parts: JSX.Element[] = [];
   let lastIndex = 0;
-  let key = 0;
   let match: RegExpExecArray | null;
   FENCED_CODE_BLOCK.lastIndex = 0;
   while ((match = FENCED_CODE_BLOCK.exec(content)) !== null) {
     if (match.index > lastIndex) {
-      parts.push(<span key={`${keyPrefix}-${key}`}>{renderInline(content.slice(lastIndex, match.index), `${keyPrefix}-t${key++}`)}</span>);
+      const k = nextKey();
+      parts.push(<span key={k}>{renderInline(content.slice(lastIndex, match.index), `t${k}`)}</span>);
     }
     const lang = match[1] || "text";
     const code = match[2].replace(/\n$/, "");
     parts.push(
-      <div className="code-block" key={`${keyPrefix}-${key++}`}>
+      <div className="code-block" key={nextKey()}>
         <div className="code-block-header">
           <span>{lang}</span>
           <button className="code-block-copy" onClick={() => navigator.clipboard.writeText(code)}>
@@ -153,7 +160,8 @@ function renderTextWithCode(content: string, keyPrefix: string): JSX.Element[] {
     lastIndex = FENCED_CODE_BLOCK.lastIndex;
   }
   if (lastIndex < content.length) {
-    parts.push(<span key={`${keyPrefix}-${key}`}>{renderInline(content.slice(lastIndex), `${keyPrefix}-t${key++}`)}</span>);
+    const k = nextKey();
+    parts.push(<span key={k}>{renderInline(content.slice(lastIndex), `t${k}`)}</span>);
   }
   return parts;
 }
@@ -169,24 +177,25 @@ function renderTextWithCode(content: string, keyPrefix: string): JSX.Element[] {
 function MessageContent({ content }: { content: string }) {
   const parts: JSX.Element[] = [];
   let lastIndex = 0;
-  let key = 0;
+  let n = 0;
+  const nextKey = () => n++;
   let match: RegExpExecArray | null;
   DIRECTIVE_BLOCK.lastIndex = 0;
   while ((match = DIRECTIVE_BLOCK.exec(content)) !== null) {
     if (match.index > lastIndex) {
-      parts.push(...renderTextWithCode(content.slice(lastIndex, match.index), `d${key}`));
+      parts.push(...renderTextWithCode(content.slice(lastIndex, match.index), nextKey));
     }
     const meta = DIRECTIVE_META[match[1]] ?? { icon: "⚙️", verb: "Working on" };
     const path = /path="([^"]*)"/.exec(match[2])?.[1] ?? "file";
     parts.push(
-      <div className="directive-chip" key={`d${key++}`}>
+      <div className="directive-chip" key={nextKey()}>
         {meta.icon} {meta.verb} <code className="inline-code">{path}</code>…
       </div>
     );
     lastIndex = DIRECTIVE_BLOCK.lastIndex;
   }
   if (lastIndex < content.length) {
-    parts.push(...renderTextWithCode(content.slice(lastIndex), `d${key}`));
+    parts.push(...renderTextWithCode(content.slice(lastIndex), nextKey));
   }
   return <>{parts}</>;
 }
