@@ -1,0 +1,2 @@
+# Shell scripts must keep LF endings — a CRLF shebang ("bash\r") fails on macOS.
+*.sh text eol=lf

@@ -1,0 +1,50 @@
+# Builds DevTop Flow as ONE universal macOS .dmg (Apple Silicon + Intel in a
+# single file) on a GitHub-hosted Mac. A .dmg can only be produced on macOS —
+# Tauri's bundler needs Apple's hdiutil/codesign and the macOS SDK — so this is
+# how a Windows machine gets one.
+#
+# Run it: push to main, or Actions tab → "Build macOS .dmg" → Run workflow.
+# Download it: the finished run's page → Artifacts → DevTop-Flow-macOS-dmg.
+
+name: Build macOS .dmg
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+          cache: npm
+
+      # Both architectures, so the universal binary can be lipo'd together.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - run: npm ci
+
+      # tauri.conf.json signs with "DevTop Flow Local Dev", a self-signed cert
+      # that only exists in the original Mac's keychain — codesign fails
+      # anywhere else. The overlay swaps in ad-hoc signing ("-") for this build
+      # only; Apple Silicon refuses to run unsigned binaries at all, so ad-hoc
+      # is the minimum, not an optional nicety.
+      - name: Build universal .dmg
+        run: npm run tauri build -- --target universal-apple-darwin --bundles dmg --config src-tauri/tauri.adhoc-signing.conf.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DevTop-Flow-macOS-dmg
+          path: src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          if-no-files-found: error
