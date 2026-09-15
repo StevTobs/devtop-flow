@@ -27,6 +27,8 @@ const en = {
   "sidebar.filenamePlaceholder": "filename.ext",
   "sidebar.unsavedChanges": "Unsaved changes",
   "sidebar.revealInExplorer": "Reveal in File Explorer",
+  "sidebar.copyPath": "Copy Path",
+  "sidebar.copyRelativePath": "Copy Relative Path",
 
   "chat.historyTitle": "Chat history",
   "chat.historySingle": "History",
@@ -37,6 +39,7 @@ const en = {
   "chat.stop": "⏹ Stop",
   "chat.stopTitle": "Force-stop everything the agent is doing right now — click here, type @stop, press Esc, or ⌘C anywhere in the app",
   "chat.resumeAnyway": "🔁 Resume anyway",
+  "chat.retry": "🔄 Retry",
   "chat.removeAttachment": "Remove attachment",
   "chat.overContextLimitTooltip": "Over the context window limit set in Agent Settings",
   "chat.modelTooltip": "Model",
@@ -64,6 +67,13 @@ const en = {
   "phase.applying": "APPLYING CHANGES",
   "phase.finalizing": "FINALIZING",
   "phase.stalled": "⚠ NO RESPONSE — STALLED",
+
+  "supervisor.manual": "⏹ Stopped.",
+  "supervisor.absoluteTimeout": "⏱ Failed — no response from the model within the time limit. The provider may be overloaded or unreachable right now.",
+  "supervisor.turnStall": "⚠️ Failed — no response from the model. The request may have dropped or the provider may be unreachable — try again.",
+  "supervisor.loopDetected": "⚠️ Stopped: possible loop detected (the model kept requesting the same file with no new progress).",
+  "supervisor.maxTurns": "⚠️ Stopped: this task used its maximum turns without finishing — it may be stuck.",
+  "supervisor.maxToolCalls": "⚠️ Stopped: a single turn tried to use more tool calls than allowed.",
 
   "directive.file": "Writing",
   "directive.read": "Reading",
@@ -143,6 +153,8 @@ const th: Record<TranslationKey, string> = {
   "sidebar.filenamePlaceholder": "ชื่อไฟล์.นามสกุล",
   "sidebar.unsavedChanges": "มีการเปลี่ยนแปลงที่ยังไม่ได้บันทึก",
   "sidebar.revealInExplorer": "เปิดตำแหน่งไฟล์ใน File Explorer",
+  "sidebar.copyPath": "คัดลอกพาธ",
+  "sidebar.copyRelativePath": "คัดลอกพาธสัมพัทธ์",
 
   "chat.historyTitle": "ประวัติแชท",
   "chat.historySingle": "ประวัติ",
@@ -153,6 +165,7 @@ const th: Record<TranslationKey, string> = {
   "chat.stop": "⏹ หยุด",
   "chat.stopTitle": "หยุดสิ่งที่เอเจนต์กำลังทำอยู่ทันที — คลิกที่นี่, พิมพ์ @stop, กด Esc หรือ ⌘C ที่ไหนก็ได้ในแอป",
   "chat.resumeAnyway": "🔁 ทำต่อเลย",
+  "chat.retry": "🔄 ลองใหม่",
   "chat.removeAttachment": "ลบไฟล์แนบ",
   "chat.overContextLimitTooltip": "เกินขีดจำกัดบริบทที่ตั้งไว้ใน Agent Settings",
   "chat.modelTooltip": "โมเดล",
@@ -180,6 +193,13 @@ const th: Record<TranslationKey, string> = {
   "phase.applying": "กำลังนำการเปลี่ยนแปลงไปใช้",
   "phase.finalizing": "กำลังสรุปผล",
   "phase.stalled": "⚠ ไม่มีการตอบสนอง — ค้าง",
+
+  "supervisor.manual": "⏹ หยุดแล้ว",
+  "supervisor.absoluteTimeout": "⏱ ล้มเหลว — ไม่ได้รับการตอบกลับจากโมเดลภายในเวลาที่กำหนด ผู้ให้บริการอาจมีภาระงานสูงหรือเชื่อมต่อไม่ได้ในขณะนี้",
+  "supervisor.turnStall": "⚠️ ล้มเหลว — ไม่ได้รับการตอบกลับจากโมเดล คำขออาจหลุดหายไปหรือผู้ให้บริการเชื่อมต่อไม่ได้ — ลองใหม่อีกครั้ง",
+  "supervisor.loopDetected": "⚠️ หยุดแล้ว: อาจเกิดการวนซ้ำ (โมเดลขอไฟล์เดิมซ้ำๆ โดยไม่มีความคืบหน้าใหม่)",
+  "supervisor.maxTurns": "⚠️ หยุดแล้ว: งานนี้ใช้จำนวนรอบสูงสุดโดยยังไม่เสร็จ — อาจติดขัดอยู่",
+  "supervisor.maxToolCalls": "⚠️ หยุดแล้ว: หนึ่งรอบพยายามใช้เครื่องมือมากกว่าที่กำหนดไว้",
 
   "directive.file": "กำลังเขียน",
   "directive.read": "กำลังอ่าน",

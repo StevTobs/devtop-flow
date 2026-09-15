@@ -333,7 +333,7 @@ html, body, #root {
 
 .sidebar .file-item.active {
   background: var(--dtf-deep-violet);
-  color: var(--dtf-text);
+  color: var(--dtf-text-on-accent);
 }
 
 .sidebar .file-item-dir {
@@ -410,6 +410,7 @@ html, body, #root {
 
 .context-menu button:hover {
   background: var(--dtf-deep-violet);
+  color: var(--dtf-text-on-accent);
 }
 
 .new-file-input {
@@ -654,7 +655,7 @@ html, body, #root {
   padding: 3px 8px;
   border-radius: 999px;
   background: var(--dtf-deep-violet);
-  color: var(--dtf-text);
+  color: var(--dtf-text-on-accent);
 }
 
 .chat-messages {
@@ -1094,6 +1095,7 @@ html, body, #root {
 
 .attach-menu-item:hover {
   background: var(--dtf-deep-violet);
+  color: var(--dtf-text-on-accent);
 }
 
 .see-chip {
@@ -1191,6 +1193,11 @@ html, body, #root {
 
 .history-row.active {
   background: var(--dtf-deep-violet);
+  color: var(--dtf-text-on-accent);
+}
+
+.history-row.active .history-row-title {
+  color: var(--dtf-text-on-accent);
 }
 
 .history-row-title {
@@ -1518,7 +1525,7 @@ html, body, #root {
 .scope-badge {
   font-size: 10px;
   background: var(--dtf-deep-violet);
-  color: var(--dtf-text);
+  color: var(--dtf-text-on-accent);
   border-radius: 4px;
   padding: 1px 5px;
 }

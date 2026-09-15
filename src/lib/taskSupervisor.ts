@@ -12,26 +12,32 @@ export type SupervisorStopReason =
   | { kind: "max-turns" }
   | { kind: "max-tool-calls" };
 
-export function supervisorStopMessage(reason: SupervisorStopReason): string {
+/** Translation key for each stop reason's message — kept as a lookup here so callers (App.tsx, ChatPanel.tsx) share one mapping instead of duplicating it. The actual strings live in lib/i18n.tsx. */
+export function supervisorStopMessageKey(reason: SupervisorStopReason) {
   switch (reason.kind) {
     case "manual":
-      return "⏹ Stopped.";
+      return "supervisor.manual" as const;
     case "absolute-timeout":
-      return "⏱ Timed out — stopped automatically with no response. The provider may be overloaded, or the request may be taking unusually long.";
+      return "supervisor.absoluteTimeout" as const;
     case "turn-stall":
-      return "⚠️ Stopped: no activity for a while — the request may have stalled.";
+      return "supervisor.turnStall" as const;
     case "loop-detected":
-      return "⚠️ Stopped: possible loop detected (the model kept requesting the same file with no new progress).";
+      return "supervisor.loopDetected" as const;
     case "max-turns":
-      return "⚠️ Stopped: this task used its maximum turns without finishing — it may be stuck.";
+      return "supervisor.maxTurns" as const;
     case "max-tool-calls":
-      return "⚠️ Stopped: a single turn tried to use more tool calls than allowed.";
+      return "supervisor.maxToolCalls" as const;
   }
 }
 
-/** Only supervisor-triggered stops (not a manual stop) offer "Resume anyway" — the user explicitly asked to stop in the manual case. */
+/** Only supervisor-triggered stops (not a manual stop) offer a way to continue — the user explicitly asked to stop in the manual case. */
 export function isResumable(reason: SupervisorStopReason): boolean {
   return reason.kind !== "manual";
+}
+
+/** A no-response/stall/timeout is a plain "it failed, try again" — bypassing supervisor limits (the other reasons: loop/max-turns/max-tool-calls) isn't the right mental model for it, so it gets its own "Retry" wording instead of "Resume anyway". */
+export function isRetryable(reason: SupervisorStopReason): boolean {
+  return reason.kind === "turn-stall" || reason.kind === "absolute-timeout";
 }
 
 /**
@@ -48,7 +54,12 @@ export function createStallWatcher(opts: {
   onRecovered: () => void;
   onTimeout: () => void;
 }) {
-  const warnAtRatio = opts.warnAtRatio ?? 0.6;
+  // Was 0.6 (54s of dead air on the 90s default before any visible warning) —
+  // a real no-response case left the UI showing a plain "SYNCHRONIZING" with
+  // no hint anything was wrong for the whole first minute. 0.3 surfaces the
+  // "stalled" phase in ~27s instead, well before most users would conclude
+  // it's broken and give up on their own.
+  const warnAtRatio = opts.warnAtRatio ?? 0.3;
   let lastActivity = Date.now();
   let warned = false;
   let stopped = false;

@@ -240,6 +240,7 @@ interface ChatPanelProps {
   overContextLimit?: boolean;
   contextLimit?: number;
   supervisorWarningText?: string;
+  supervisorCanRetry?: boolean;
   onResumeAnyway: () => void;
   onDismissWarning: () => void;
 }
@@ -271,6 +272,7 @@ export default function ChatPanel({
   overContextLimit,
   contextLimit,
   supervisorWarningText,
+  supervisorCanRetry,
   onResumeAnyway,
   onDismissWarning,
 }: ChatPanelProps) {
@@ -434,7 +436,7 @@ export default function ChatPanel({
         <div className="supervisor-warning">
           <span>{supervisorWarningText}</span>
           <button className="text-btn" onClick={onResumeAnyway}>
-            {t("chat.resumeAnyway")}
+            {supervisorCanRetry ? t("chat.retry") : t("chat.resumeAnyway")}
           </button>
           <button className="text-btn" onClick={onDismissWarning}>
             ✕

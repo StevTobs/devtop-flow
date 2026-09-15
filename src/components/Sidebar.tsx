@@ -2,6 +2,14 @@ import { useState, type MouseEvent } from "react";
 import { FileEntry, fileIconFor, listDir, parentDir, revealInFileExplorer } from "../lib/fileSystem";
 import { useI18n } from "../lib/i18n";
 
+/** `path` relative to `root`, forward-slash normalized regardless of the OS's native separator — for "Copy Relative Path", where the point is a portable, human-readable path rather than exactly what the OS would show. */
+function relativeToRoot(root: string, path: string): string {
+  const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
+  const cleanRoot = norm(root);
+  const cleanPath = norm(path);
+  return cleanPath.startsWith(`${cleanRoot}/`) ? cleanPath.slice(cleanRoot.length + 1) : cleanPath;
+}
+
 interface TreeNodeProps {
   entry: FileEntry;
   depth: number;
@@ -253,6 +261,24 @@ export default function Sidebar({
             >
               {t("sidebar.revealInExplorer")}
             </button>
+            <button
+              onClick={() => {
+                navigator.clipboard.writeText(contextMenu.path);
+                closeContextMenu();
+              }}
+            >
+              {t("sidebar.copyPath")}
+            </button>
+            {projectRoot && (
+              <button
+                onClick={() => {
+                  navigator.clipboard.writeText(relativeToRoot(projectRoot, contextMenu.path));
+                  closeContextMenu();
+                }}
+              >
+                {t("sidebar.copyRelativePath")}
+              </button>
+            )}
           </div>
         </>
       )}

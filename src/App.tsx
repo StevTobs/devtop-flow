@@ -61,7 +61,8 @@ import {
   estimateProgress,
   hashReadPaths,
   isResumable,
-  supervisorStopMessage,
+  isRetryable,
+  supervisorStopMessageKey,
 } from "./lib/taskSupervisor";
 import logo from "./assets/logo.png";
 import { useI18n } from "./lib/i18n";
@@ -865,7 +866,7 @@ export default function App() {
 
     const reportAbortedOutcome = () => {
       const reason = abortReason ?? { kind: "manual" as const };
-      setMessages([...priorTurns, ...latestTrailing, { role: "assistant", content: supervisorStopMessage(reason) }]);
+      setMessages([...priorTurns, ...latestTrailing, { role: "assistant", content: t(supervisorStopMessageKey(reason)) }]);
       if (isResumable(reason)) setSupervisorWarning({ reason, sessionId });
     };
 
@@ -1273,7 +1274,8 @@ export default function App() {
           agentProgress={agentProgress}
           overContextLimit={overContextLimit}
           contextLimit={effectiveAgentSettings.contextLimit}
-          supervisorWarningText={activeSupervisorWarning ? supervisorStopMessage(activeSupervisorWarning) : undefined}
+          supervisorWarningText={activeSupervisorWarning ? t(supervisorStopMessageKey(activeSupervisorWarning)) : undefined}
+          supervisorCanRetry={!!activeSupervisorWarning && isRetryable(activeSupervisorWarning)}
           onResumeAnyway={resumeAnyway}
           onDismissWarning={() => setSupervisorWarning(undefined)}
         />
