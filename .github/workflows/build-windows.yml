@@ -1,0 +1,48 @@
+# Builds the DevTop Flow Windows installer (.exe, NSIS) and .msi on a
+# GitHub-hosted Windows machine. Tauri needs the MSVC toolchain and Windows
+# SDK to produce a Windows build, so it can't come from a Mac — this is how a
+# Mac gets one.
+#
+# Run it: push to main, or Actions tab → "Build Windows .exe" → Run workflow.
+# Download it: the finished run's page → Artifacts → DevTop-Flow-Windows-exe.
+
+name: Build Windows .exe
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - run: npm ci
+
+      - run: npm test
+
+      # macOS-only settings in tauri.conf.json (signingIdentity etc.) are
+      # ignored by the Windows bundler, so no config overlay is needed here.
+      - name: Build installer
+        run: npm run tauri build -- --bundles nsis,msi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DevTop-Flow-Windows-exe
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/msi/*.msi
+          if-no-files-found: error

@@ -1,47 +1,52 @@
 # Building DevTop Flow for Windows
 
-The source is already portable — cross-platform config (Keychain vs. Credential
-Manager for API keys, `.ico` icon, portable bundle targets) is done and
-verified against the macOS build. Producing the actual `.exe` has to happen
-on a real Windows machine — it can't be cross-compiled from this Mac.
+A Windows build needs the MSVC toolchain, so the `.exe` can't be built on a
+Mac. There are two ways to get one.
 
-## 1. Install prerequisites (one-time)
+## Option A — GitHub Actions (no Windows machine needed)
 
-- **[Node.js LTS](https://nodejs.org)**
-- **[Rust via rustup](https://rustup.rs)** — accept the default (MSVC) toolchain when prompted
-- **Visual Studio Build Tools** — required by Tauri on Windows.
-  ```powershell
-  winget install Microsoft.VisualStudio.2022.BuildTools
-  ```
-  In the installer, select the **"Desktop development with C++"** workload.
-- **WebView2 Runtime** — already built into Windows 10/11 on virtually all modern machines; nothing to do.
+`.github/workflows/build-windows.yml` builds the installer on a GitHub-hosted
+Windows runner on every push to `main`. You can also run it by hand from
+**Actions → "Build Windows .exe" → Run workflow**.
 
-## 2. Get the project onto that machine
+When the run finishes, download the **DevTop-Flow-Windows-exe** artifact from
+the run's page, or from the command line:
 
-This project isn't in a git repo, so the simplest way is to zip the whole
-`devtop-flow` folder and transfer it via cloud drive / USB / etc. (Set up git
-first if you'd rather sync it that way instead.)
-
-## 3. Build it
-
-```powershell
-cd devtop-flow
-npm install
-npm run tauri build
+```bash
+gh run download --name DevTop-Flow-Windows-exe --dir ./windows-build
 ```
 
-## 4. Find the output
+## Option B — build on a Windows machine
+
+1. Install the prerequisites (one-time):
+   - **[Node.js LTS](https://nodejs.org)**
+   - **[Rust via rustup](https://rustup.rs)**. Accept the default (MSVC) toolchain.
+   - **Visual Studio Build Tools**, with the **"Desktop development with C++"** workload:
+     ```powershell
+     winget install Microsoft.VisualStudio.2022.BuildTools
+     ```
+   - **WebView2 Runtime**. It's already built into Windows 10/11.
+2. Build:
+   ```powershell
+   git clone git@github.com:StevTobs/devtop-flow.git
+   cd devtop-flow
+   npm ci
+   npm run tauri build -- --bundles nsis,msi
+   ```
+
+## Output
 
 ```
-src-tauri\target\release\bundle\nsis\DevTop Flow_0.1.0_x64-setup.exe
+src-tauri\target\release\bundle\nsis\DevTop Flow_<version>_x64-setup.exe   ← the installer to share
+src-tauri\target\release\bundle\msi\DevTop Flow_<version>_x64_en-US.msi   ← same app, .msi format
 ```
 
-That's the single shareable installer `.exe`. An `.msi` is also built
-alongside it in `bundle\msi\` if you'd rather distribute that format instead.
+The installer installs per-user (`installMode: currentUser`), so it doesn't
+need admin rights.
 
 ## Expect a SmartScreen warning
 
-Since the installer is unsigned (no Windows code-signing certificate), Windows
-SmartScreen will show a "Windows protected your PC" warning on first run —
-normal for unsigned installers, not a bug. A paid code-signing certificate is
-the fix if this needs to go away later.
+The installer is unsigned (there's no Windows code-signing certificate), so on
+first run Windows SmartScreen shows "Windows protected your PC". Click
+**More info → Run anyway**. This is normal for unsigned installers, not a bug.
+A paid code-signing certificate would remove the warning.
