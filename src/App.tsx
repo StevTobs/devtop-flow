@@ -1,13 +1,15 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import Sidebar from "./components/Sidebar";
 import EditorPane, { EditorTab } from "./components/EditorPane";
 import ChatPanel from "./components/ChatPanel";
-import TerminalPanel from "./components/TerminalPanel";
+const TerminalPanel = lazy(() => import("./components/TerminalPanel"));
 import Settings from "./components/Settings";
 import PrivacyNotice from "./components/PrivacyNotice";
 import AgentSettingsPanel from "./components/AgentSettingsPanel";
 import {
   ChatMessage,
+  StreamChunk,
+  toRequestMessages,
   buildProviderRegistry,
   checkOllamaStatus,
   listAnthropicModels,
@@ -20,18 +22,19 @@ import {
 import { save } from "@tauri-apps/plugin-dialog";
 import { ApiKeyProvider, loadAllApiKeys } from "./lib/secrets";
 import {
-  FileEntry,
   base64ToBytes,
   buildFileTree,
   createBinaryFile,
   createFile,
   isRasterImagePath,
+  isSameOrDescendant,
   languageFromPath,
   listDir,
   pickAnyFiles,
   pickProjectFolder,
   readFile,
   readImageAsDataUrl,
+  rebasePath,
   writeFile,
 } from "./lib/fileSystem";
 import { buildFileContextMessage, buildImageAttachmentMessage, estimateTokens } from "./lib/contextBuilder";
@@ -40,6 +43,7 @@ import {
   applyImageDirectives,
   buildReadResultsMessage,
   buildToolCapabilityMessage,
+  extractFileDirectives,
   extractReadRequests,
 } from "./lib/agentTools";
 import { formatFromPath, renderBlankImage } from "./lib/imageGen";
@@ -57,8 +61,8 @@ import {
 import {
   AgentPhase,
   SupervisorStopReason,
+  TaskStatus,
   createStallWatcher,
-  estimateProgress,
   hashReadPaths,
   isResumable,
   isRetryable,
@@ -83,7 +87,9 @@ export default function App() {
   const [projectRoot, setProjectRoot] = useState<string | undefined>(
     () => localStorage.getItem(PROJECT_ROOT_KEY) ?? undefined
   );
-  const [rootEntries, setRootEntries] = useState<FileEntry[]>([]);
+  // Bumped whenever files may have changed on disk — the Explorer re-lists
+  // the root and every expanded folder in response.
+  const [treeRefreshKey, setTreeRefreshKey] = useState(0);
   // Cached separately from rootEntries (which is just the top level, for the
   // sidebar) — this is the full recursive tree text sent to the model, built
   // once per folder-open/refresh instead of on every single model turn.
@@ -144,6 +150,10 @@ export default function App() {
   // Integrated terminal (VS Code-style): hideable panel below the editor,
   // its own PTY session that survives show/hide toggles.
   const [terminalOpen, setTerminalOpen] = useState(false);
+  const [terminalStarted, setTerminalStarted] = useState(false);
+  useEffect(() => {
+    if (terminalOpen) setTerminalStarted(true);
+  }, [terminalOpen]);
   const [terminalHeight, setTerminalHeight] = useState<number>(() => {
     const raw = localStorage.getItem(TERMINAL_HEIGHT_KEY);
     const n = raw ? Number(raw) : NaN;
@@ -246,12 +256,15 @@ export default function App() {
   };
   const { locale, setLocale, t } = useI18n();
   const toggleLocale = () => setLocale(locale === "en" ? "th" : "en");
-  // True for the entire task — every model turn, agentic read round trip,
-  // and file-creation pass — not just the gap before the first token.
-  const [isSending, setIsSending] = useState(false);
-  const abortControllerRef = useRef<AbortController | null>(null);
-  /** Forces every in-flight step of the current task to stop — the model turn, any read round trip, file writes. Wired to the Stop control, Esc, ⌘C, and the @stop chat command. */
-  const stopCurrentTask = () => abortControllerRef.current?.abort();
+  // One running task per chat (keyed by session id), covering the entire
+  // task — every model turn, agentic read round trip, and file-writing pass —
+  // not just the gap before the first token. Per chat rather than global, so
+  // switching chats mid-task never shows one chat's status in another.
+  const [tasks, setTasks] = useState<Record<string, TaskStatus>>({});
+  const taskControllersRef = useRef(new Map<string, AbortController>());
+  const patchTask = (sessionId: string, patch: Partial<TaskStatus>) =>
+    setTasks((prev) => (prev[sessionId] ? { ...prev, [sessionId]: { ...prev[sessionId], ...patch } } : prev));
+  const stopTask = (sessionId: string) => taskControllersRef.current.get(sessionId)?.abort();
 
   // Agent Control Panel (agent-control-panel-prompt.md): the global default
   // lives in localStorage; a project folder gets its own on-disk copy (like
@@ -261,11 +274,8 @@ export default function App() {
   const [baseAgentSettings, setBaseAgentSettings] = useState<AgentSettings>(loadGlobalAgentSettings);
   const [settingsScope, setSettingsScope] = useState<"global" | "chat">("global");
 
-  // Phase-based progress (agent-control-panel-prompt.md §3), plus the
-  // runaway/overrun supervisor's warning banner (§2) when a task is stopped
-  // for a reason other than the user manually asking it to stop.
-  const [agentPhase, setAgentPhase] = useState<AgentPhase>("idle");
-  const [agentProgress, setAgentProgress] = useState(0);
+  // The runaway/overrun supervisor's warning banner (agent-control-panel-prompt.md
+  // §2) when a task ends for a reason other than the user asking it to stop.
   const [supervisorWarning, setSupervisorWarning] = useState<{ reason: SupervisorStopReason; sessionId: string }>();
 
   // Privacy disclosure: shown automatically the first time a given folder is
@@ -363,6 +373,11 @@ export default function App() {
     setPendingAttachments((prev) => prev.filter((_, i) => i !== index));
 
   const messages = activeSession.messages;
+  const activeTask = tasks[activeSessionId];
+  const isSending = !!activeTask;
+  const anyTaskRunning = Object.keys(tasks).length > 0;
+  /** Forces every in-flight step of this chat's task to stop — the model turn, any read round trip, file writes. Wired to the Stop control, Esc, ⌘C, and the @stop chat command. */
+  const stopCurrentTask = () => stopTask(activeSessionId);
   const messageCosts = activeSession.messageCosts;
   const sessionCost = activeSession.sessionCost;
 
@@ -428,18 +443,43 @@ export default function App() {
     });
   };
 
+  // Chat history is written at most every 800ms (with a trailing write), not
+  // on every state change — streaming used to rewrite the whole history file
+  // to disk once per token, which is what made long replies stutter.
+  const pendingSaveRef = useRef<{ root: string | undefined; sessions: ChatSession[]; activeId: string }>();
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  const flushSessionSave = () => {
+    clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = undefined;
+    const pending = pendingSaveRef.current;
+    pendingSaveRef.current = undefined;
+    if (pending) saveSessions(pending.root, pending.sessions, pending.activeId);
+  };
+
   useEffect(() => {
     // Skip saving until the first real load resolves — otherwise this fires
     // with the throwaway placeholder session and clobbers real history.
     if (sessionsLoading) return;
-    saveSessions(sessionsRootRef.current, sessions, activeSessionId);
+    const root = sessionsRootRef.current;
+    if (pendingSaveRef.current && pendingSaveRef.current.root !== root) flushSessionSave();
+    pendingSaveRef.current = { root, sessions, activeId: activeSessionId };
+    if (!saveTimerRef.current) saveTimerRef.current = setTimeout(flushSessionSave, 800);
   }, [sessions, activeSessionId, sessionsLoading]);
+
+  useEffect(() => {
+    window.addEventListener("beforeunload", flushSessionSave);
+    return () => window.removeEventListener("beforeunload", flushSessionSave);
+  }, []);
 
   // Load (or reload, on folder switch) the chat history for whichever
   // folder is open — from that folder's own .devtopflow/chat-history.json
   // if there is one, else the app's local no-folder storage.
   useEffect(() => {
     let cancelled = false;
+    // Persist the previous folder's history before swapping it out, and stop
+    // any task still writing into it.
+    flushSessionSave();
+    taskControllersRef.current.forEach((c) => c.abort());
     setSessionsLoading(true);
     loadSessions(projectRoot).then((next) => {
       if (cancelled) return;
@@ -484,7 +524,6 @@ export default function App() {
     if (projectRoot) {
       setIsOpeningFolder(true);
       listDir(projectRoot)
-        .then(setRootEntries)
         .then(() => buildFileTree(projectRoot))
         .then(setCachedFileTree)
         .catch((e) => {
@@ -546,9 +585,8 @@ export default function App() {
     }
     setIsOpeningFolder(true);
     try {
-      const entries = await listDir(folder);
+      await listDir(folder); // fails fast on an unreadable folder, before switching to it
       setProjectRoot(folder);
-      setRootEntries(entries);
       setCachedFileTree(await buildFileTree(folder));
       localStorage.setItem(PROJECT_ROOT_KEY, folder);
       if (!loadConsentedFolders().has(folder)) {
@@ -569,7 +607,7 @@ export default function App() {
     if (!projectRoot) return;
     setIsOpeningFolder(true);
     try {
-      setRootEntries(await listDir(projectRoot));
+      setTreeRefreshKey((k) => k + 1);
       setCachedFileTree(await buildFileTree(projectRoot));
     } finally {
       setIsOpeningFolder(false);
@@ -627,6 +665,23 @@ export default function App() {
     }
     setOpenTabs((prev) => prev.map((t) => (refreshed.has(t.path) ? { ...t, imageSrc: refreshed.get(t.path) } : t)));
     await openFile(paths[0]);
+  };
+
+  /** Explorer rename/move: open tabs for that file (or anything inside that folder) follow it to the new path. */
+  const handlePathMoved = (oldPath: string, newPath: string) => {
+    setOpenTabs((prev) =>
+      prev.map((t) => (isSameOrDescendant(t.path, oldPath) ? { ...t, path: rebasePath(t.path, oldPath, newPath) } : t))
+    );
+    setActiveTabPath((p) => (p && isSameOrDescendant(p, oldPath) ? rebasePath(p, oldPath, newPath) : p));
+  };
+
+  /** Explorer delete: close tabs for anything that was moved to the Trash. */
+  const handlePathDeleted = (path: string) => {
+    setOpenTabs((prev) => {
+      const next = prev.filter((t) => !isSameOrDescendant(t.path, path));
+      if (activeTabPath && isSameOrDescendant(activeTabPath, path)) setActiveTabPath(next[0]?.path);
+      return next;
+    });
   };
 
   const closeTab = (path: string) => {
@@ -693,9 +748,15 @@ export default function App() {
       }
       // Terminal-style force-quit: Cmd+C (Ctrl+C) interrupts whatever the
       // agent is doing, anywhere in the app — not just the chat input. Only
-      // hijacks Cmd+C while a task is actually running, so normal copy still
-      // works the rest of the time.
-      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === "c" && isSending) {
+      // hijacks Cmd+C while a task is actually running and nothing is
+      // selected, so copying text out of a streaming reply still works.
+      if (
+        (e.metaKey || e.ctrlKey) &&
+        !e.shiftKey &&
+        e.key.toLowerCase() === "c" &&
+        isSending &&
+        !window.getSelection()?.toString()
+      ) {
         e.preventDefault();
         stopCurrentTask();
       }
@@ -795,6 +856,7 @@ export default function App() {
       }`
     );
     if (!ok) return;
+    stopTask(id);
 
     setSessions((prev) => {
       const next = prev.filter((s) => s.id !== id);
@@ -813,11 +875,16 @@ export default function App() {
 
   /**
    * Runs one full agent task (every model turn, agentic read round trip, and
-   * file-creation pass) under the runaway/overrun supervisor
-   * (agent-control-panel-prompt.md §2): bounded turns, bounded tool calls
-   * per turn, a per-turn stall watcher, and a repeated-identical-read loop
-   * detector. `bypassLimits` is set only by "Resume anyway" after a
-   * supervisor stop — the manual Stop/Esc/⌘C/@stop path always still works.
+   * file-writing pass) for one chat, under the runaway/overrun supervisor
+   * (agent-control-panel-prompt.md §2): bounded turns, bounded tool calls per
+   * turn, a per-turn no-activity watcher, and a repeated-identical-read loop
+   * detector. `bypassLimits` is set only by "Resume anyway" after a supervisor
+   * stop — the manual Stop/Esc/⌘C/@stop path always still works.
+   *
+   * Every line this adds to the transcript goes through `trailing`, so the
+   * final state is always exactly what the task produced — partial answer,
+   * error, or stop notice — with UI-only lines tagged `meta` so they're never
+   * sent back to the model on the next turn.
    */
   const runAgentTask = async (
     sessionId: string,
@@ -825,263 +892,290 @@ export default function App() {
     effSettings: AgentSettings,
     bypassLimits: boolean
   ) => {
+    if (taskControllersRef.current.has(sessionId)) return; // already running in this chat
+
     const setMessages = (msgs: ChatMessage[]) =>
       updateSession(sessionId, (s) => ({
         ...s,
         messages: msgs,
         title: s.title === "New Chat" ? deriveTitle(msgs) : s.title,
       }));
-    setMessages(priorTurns);
 
-    if (!activeProvider) {
-      setMessages([...priorTurns, { role: "assistant", content: "No model configured yet — add an API key via ⚙ in the sidebar." }]);
+    const trailing: ChatMessage[] = [];
+    // Streaming deltas are batched to one transcript update per frame.
+    let renderQueued = false;
+    const flush = () => {
+      renderQueued = false;
+      setMessages([...priorTurns, ...trailing]);
+    };
+    const render = (immediate = false) => {
+      if (immediate) return flush();
+      if (renderQueued) return;
+      renderQueued = true;
+      requestAnimationFrame(flush);
+    };
+    render(true);
+
+    const provider = activeProvider;
+    if (!provider) {
+      trailing.push({ role: "assistant", content: t("chat.noModelHint"), meta: "error" });
+      render(true);
       return;
     }
 
     const controller = new AbortController();
-    abortControllerRef.current = controller;
-    // Same array reference as `trailing` inside runSendTurns below — mutated
-    // in place, so this always reflects whatever streamed in before a stop.
-    let latestTrailing: ChatMessage[] = [];
+    taskControllersRef.current.set(sessionId, controller);
     let abortReason: SupervisorStopReason | undefined;
     const supervisorAbort = (reason: SupervisorStopReason) => {
       if (controller.signal.aborted) return;
       abortReason = reason;
       controller.abort();
     };
+    // Rejects the moment the task is aborted — raced against each provider
+    // call so a stop takes effect immediately even if the underlying HTTP
+    // stream doesn't notice the abort signal right away.
+    const aborted = new Promise<never>((_, reject) => {
+      controller.signal.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), {
+        once: true,
+      });
+    });
+    aborted.catch(() => {});
 
-    // An attached image adds real, often-slow-network upload time on top of
-    // the provider's own (also slower, for vision) time-to-first-token — the
-    // stall watcher needs a bigger grace window for that, or a normal image
-    // attachment reads as a false "stalled"/timed-out task.
+    // An attached image adds real upload time on top of the provider's own
+    // (slower, for vision) time-to-first-token — give it a bigger window
+    // before calling it a stall.
     const hasImage = priorTurns.some((m) => !!m.image);
-    const effTurnTimeoutMs = hasImage ? effSettings.turnTimeoutMs * 2 : effSettings.turnTimeoutMs;
+    const turnTimeoutMs = hasImage ? effSettings.turnTimeoutMs * 2 : effSettings.turnTimeoutMs;
+    let outputTokensSoFar = 0;
 
-    // Absolute last-resort cap, derived from the configured limits — the
-    // per-turn stall watcher below catches the common "hung silently" case
-    // far sooner than this; this just guarantees the task can never outlive
-    // its own settings by an unbounded amount.
-    const absoluteTimeoutMs = effSettings.maxTurnsPerTask * effTurnTimeoutMs + 60_000;
-    const absoluteTimeoutId = setTimeout(() => supervisorAbort({ kind: "absolute-timeout" }), absoluteTimeoutMs);
+    setTasks((prev) => ({
+      ...prev,
+      [sessionId]: { phase: "connecting", startedAt: Date.now(), turn: 1, outputTokens: 0, timeoutMs: turnTimeoutMs },
+    }));
 
-    const reportAbortedOutcome = () => {
-      const reason = abortReason ?? { kind: "manual" as const };
-      setMessages([...priorTurns, ...latestTrailing, { role: "assistant", content: t(supervisorStopMessageKey(reason)) }]);
-      if (isResumable(reason)) setSupervisorWarning({ reason, sessionId });
-    };
-
-    setIsSending(true);
-    setAgentPhase("parsing");
-    setAgentProgress(estimateProgress("parsing", 0, effSettings.maxOutputTokens));
-    try {
-      await runSendTurns();
-      if (controller.signal.aborted) reportAbortedOutcome();
-    } catch (e) {
-      if (controller.signal.aborted) {
-        reportAbortedOutcome();
-      } else {
-        throw e;
-      }
-    } finally {
-      clearTimeout(absoluteTimeoutId);
-      setIsSending(false);
-      setAgentPhase("idle");
-      setAgentProgress(0);
-      abortControllerRef.current = null;
+    interface TurnResult {
+      text: string;
+      failed: boolean;
     }
 
-    async function runSendTurns() {
-      // Each call below is one model turn; `trailing` accumulates every
-      // assistant message added during this task (the initial answer, plus
-      // any follow-up turns from agentic file-read round trips).
-      const trailing: ChatMessage[] = [];
-      latestTrailing = trailing;
-      const render = () => setMessages([...priorTurns, ...trailing]);
-
-      const runTurn = async (extraContext: ChatMessage[]): Promise<string> => {
-        const toolMessage = buildToolCapabilityMessage(
+    const runTurn = async (agentContext: ChatMessage[], turn: number): Promise<TurnResult> => {
+      const systemMessages: ChatMessage[] = [
+        buildToolCapabilityMessage(
           projectRoot,
           cachedFileTree,
           effSettings.includeWorkspaceTree,
-          // Generative images need the OpenAI key; the SVG→PNG path never does,
-          // so it stays offered either way.
+          // Generative images need the OpenAI key; the SVG→PNG path never does.
           !!apiKeys.openai
-        );
-        const systemMessages: ChatMessage[] = [toolMessage];
-        if (effSettings.systemPromptOverride.trim()) {
-          systemMessages.push({ role: "system", content: effSettings.systemPromptOverride.trim() });
+        ),
+      ];
+      if (effSettings.systemPromptOverride.trim()) {
+        systemMessages.push({ role: "system", content: effSettings.systemPromptOverride.trim() });
+      }
+      // The open editor file, freshly read on every turn — not saved into
+      // chat history, since its content can change turn to turn.
+      const autoFileContext: ChatMessage[] =
+        effSettings.includeOpenFile && openPath && !activeTab?.imageSrc
+          ? [
+              buildFileContextMessage({
+                relativePath: relativePath ?? openPath,
+                languageId: languageFromPath(openPath),
+                content: editorValue,
+                selection,
+              }),
+            ]
+          : [];
+      const requestMessages = [
+        ...systemMessages,
+        ...toRequestMessages(priorTurns),
+        ...autoFileContext,
+        ...agentContext,
+      ];
+
+      const assistantIndex = priorTurns.length + trailing.length;
+      trailing.push({ role: "assistant", content: "" });
+      render(true);
+
+      let phase: AgentPhase = "connecting";
+      const setPhase = (next: AgentPhase) => {
+        if (phase === next) return;
+        phase = next;
+        patchTask(sessionId, { phase: next });
+      };
+      patchTask(sessionId, { phase: "connecting", turn, detail: undefined, stalledSince: undefined });
+
+      let text = "";
+      let sawThinking = false;
+      let stopReason: string | undefined;
+      let reportedOutputTokens = 0;
+      let lastTokenPatch = 0;
+
+      const stall = createStallWatcher({
+        timeoutMs: turnTimeoutMs,
+        onWarn: () => patchTask(sessionId, { stalledSince: Date.now() }),
+        onRecovered: () => patchTask(sessionId, { stalledSince: undefined }),
+        onTimeout: () => supervisorAbort({ kind: "turn-stall" }),
+      });
+
+      const onChunk = (chunk: StreamChunk) => {
+        if (controller.signal.aborted) return;
+        stall.ping();
+        if (chunk.activity === "connected" && phase === "connecting") setPhase("waiting");
+        if (chunk.thinking) {
+          sawThinking = true;
+          if (phase !== "streaming") setPhase("thinking");
         }
-        // The open editor file, freshly read on every turn — not saved into
-        // chat history, since its content can change turn to turn.
-        const autoFileContext: ChatMessage[] =
-          effSettings.includeOpenFile && openPath && !activeTab?.imageSrc
-            ? [
-                buildFileContextMessage({
-                  relativePath: relativePath ?? openPath,
-                  languageId: languageFromPath(openPath),
-                  content: editorValue,
-                  selection,
-                }),
-              ]
-            : [];
-        const requestMessages = [...systemMessages, ...priorTurns, ...autoFileContext, ...extraContext];
-        const assistantIndex = priorTurns.length + trailing.length;
-        trailing.push({ role: "assistant", content: "" });
-        render();
-
-        // Tracked locally (not just via the async setAgentPhase state) so the
-        // waiting-boost interval below can tell it's been superseded by a
-        // stall warning and stop nudging progress upward — a stalled task
-        // must show as stalled, not keep fake-progressing toward completion.
-        let localPhase: AgentPhase = "waiting";
-        const setPhase = (p: AgentPhase) => {
-          localPhase = p;
-          setAgentPhase(p);
-        };
-        setPhase("waiting");
-        setAgentProgress(estimateProgress("waiting", 0, effSettings.maxOutputTokens));
-        // Fallback increment so the bar never looks frozen before the first
-        // token arrives.
-        let waitingBoost = 0;
-        const waitingBoostId = setInterval(() => {
-          if (localPhase !== "waiting") return;
-          waitingBoost = Math.min(waitingBoost + 0.005, 0.05);
-          setAgentProgress(0.1 + waitingBoost);
-        }, 500);
-
-        let turnText = "";
-        const stall = createStallWatcher({
-          timeoutMs: effTurnTimeoutMs,
-          onWarn: () => setPhase("stalled"),
-          onRecovered: () => setPhase(turnText ? "streaming" : "waiting"),
-          onTimeout: () => supervisorAbort({ kind: "turn-stall" }),
-        });
-
-        try {
-          await activeProvider.chat(
-            requestMessages,
-            (chunk) => {
-              stall.ping();
-              if (chunk.delta) {
-                if (turnText === "") setPhase("streaming");
-                turnText += chunk.delta;
-                trailing[trailing.length - 1] = { role: "assistant", content: turnText };
-                render();
-                setAgentProgress(estimateProgress("streaming", turnText.length / 4, effSettings.maxOutputTokens));
-              }
-              if (chunk.usage) {
-                const cost = estimateCost(activeProvider.vendor, activeProvider.label, chunk.usage);
-                updateSession(sessionId, (s) => ({
-                  ...s,
-                  messageCosts: { ...s.messageCosts, [assistantIndex]: formatCost(cost) },
-                  sessionCost: { usd: s.sessionCost.usd + cost.usd, thb: s.sessionCost.thb + cost.thb },
-                }));
-                addSpend(cost.usd, cost.thb);
-              }
-            },
-            {
-              signal: controller.signal,
-              temperature: effSettings.temperature,
-              maxOutputTokens: effSettings.maxOutputTokens,
-              thinkingMode: effSettings.thinkingMode,
-              maxThinkingTokens: effSettings.maxThinkingTokens,
-            }
-          );
-        } catch (e) {
-          // A real failure (bad key, network error, provider outage) — not a
-          // user-initiated stop — used to propagate as an unhandled promise
-          // rejection: the reply bubble just stayed empty forever with no
-          // visible feedback at all. Abort is already handled elsewhere
-          // (reportAbortedOutcome), so only intercept the non-abort case.
-          if (controller.signal.aborted) throw e;
-          const message = e instanceof Error ? e.message : String(e);
-          turnText = `⚠️ Couldn't reach ${activeProvider.label} (${activeProvider.vendor}): ${message}`;
-          trailing[trailing.length - 1] = { role: "assistant", content: turnText };
+        if (chunk.delta) {
+          setPhase("streaming");
+          text += chunk.delta;
+          trailing[trailing.length - 1] = { role: "assistant", content: text };
           render();
-        } finally {
-          stall.stop();
-          clearInterval(waitingBoostId);
+          const now = Date.now();
+          if (now - lastTokenPatch > 300) {
+            lastTokenPatch = now;
+            patchTask(sessionId, { outputTokens: outputTokensSoFar + Math.round(text.length / 4) });
+          }
         }
-        return turnText;
+        if (chunk.stopReason) stopReason = chunk.stopReason;
+        if (chunk.usage) {
+          reportedOutputTokens = chunk.usage.outputTokens ?? 0;
+          const cost = estimateCost(provider.vendor, provider.label, chunk.usage);
+          updateSession(sessionId, (s) => ({
+            ...s,
+            messageCosts: { ...s.messageCosts, [assistantIndex]: formatCost(cost) },
+            sessionCost: { usd: s.sessionCost.usd + cost.usd, thb: s.sessionCost.thb + cost.thb },
+          }));
+          addSpend(cost.usd, cost.thb);
+        }
       };
 
-      let assistantText = await runTurn([]);
-      let turns = 1;
+      try {
+        const request = provider.chat(requestMessages, onChunk, {
+          signal: controller.signal,
+          temperature: effSettings.temperature,
+          maxOutputTokens: effSettings.maxOutputTokens,
+          thinkingMode: effSettings.thinkingMode,
+          maxThinkingTokens: effSettings.maxThinkingTokens,
+        });
+        request.catch(() => {}); // if the abort race wins, this still settles later
+        await Promise.race([request, aborted]);
+      } catch (e) {
+        if (controller.signal.aborted) throw e;
+        // A real failure (bad key, network error, provider outage, a
+        // mid-stream error event) — keep whatever partial answer arrived and
+        // say exactly what went wrong.
+        const message = e instanceof Error ? e.message : String(e);
+        if (!text) trailing.pop();
+        trailing.push({
+          role: "assistant",
+          content: t("chat.requestFailed", { model: provider.label, error: message }),
+          meta: "error",
+        });
+        render(true);
+        return { text, failed: true };
+      } finally {
+        stall.stop();
+      }
+
+      outputTokensSoFar += reportedOutputTokens || Math.round(text.length / 4);
+      patchTask(sessionId, { outputTokens: outputTokensSoFar });
+
+      if (!text.trim()) {
+        trailing.pop();
+        trailing.push({
+          role: "assistant",
+          content: sawThinking ? t("chat.emptyAfterThinking") : t("chat.emptyResponse"),
+          meta: "error",
+        });
+        render(true);
+        return { text: "", failed: true };
+      }
+      render(true);
+      if (stopReason === "max_tokens") {
+        trailing.push({
+          role: "assistant",
+          content: t("chat.truncated", { n: effSettings.maxOutputTokens.toLocaleString() }),
+          meta: "notice",
+        });
+        render(true);
+      }
+      return { text, failed: false };
+    };
+
+    const runTask = async () => {
+      let turn = 1;
+      let result = await runTurn([], turn);
+      // Everything the model has seen/said during this task's read loop, so
+      // each follow-up turn keeps the earlier files it asked for too.
+      let agentContext: ChatMessage[] = [];
       let lastReadHash: string | null = null;
       let stagnantCount = 0;
 
       // Agentic read loop: the model can ask to see specific files' contents
-      // (rather than just the file tree it was given) and keep iterating,
-      // bounded by maxTurnsPerTask/maxToolCallsPerTurn and a loop detector
-      // that catches it re-requesting the same file(s) with no new progress.
-      while (projectRoot) {
-        const readPaths = extractReadRequests(assistantText);
+      // and keep iterating, bounded by the supervisor limits.
+      while (projectRoot && !result.failed) {
+        const readPaths = extractReadRequests(result.text);
         if (readPaths.length === 0) break;
 
         if (!bypassLimits && readPaths.length > effSettings.maxToolCallsPerTurn) {
-          supervisorAbort({ kind: "max-tool-calls" });
-          return;
+          return supervisorAbort({ kind: "max-tool-calls" });
         }
-
         const hash = hashReadPaths(readPaths);
         if (hash === lastReadHash) {
           stagnantCount++;
-          if (!bypassLimits && stagnantCount >= 2) {
-            supervisorAbort({ kind: "loop-detected" });
-            return;
-          }
+          if (!bypassLimits && stagnantCount >= 2) return supervisorAbort({ kind: "loop-detected" });
         } else {
           stagnantCount = 0;
           lastReadHash = hash;
         }
-
-        if (!bypassLimits && turns >= effSettings.maxTurnsPerTask) {
-          supervisorAbort({ kind: "max-turns" });
-          return;
+        if (!bypassLimits && turn >= effSettings.maxTurnsPerTask) {
+          return supervisorAbort({ kind: "max-turns" });
         }
 
-        trailing[trailing.length - 1] = {
-          role: "assistant",
-          content: `🔍 Reading ${readPaths.map((p) => `\`${p}\``).join(", ")}…`,
-        };
-        render();
+        patchTask(sessionId, { phase: "reading", detail: readPaths.join(", ") });
         const readResults = await buildReadResultsMessage(projectRoot, readPaths);
-        assistantText = await runTurn([{ role: "assistant", content: assistantText }, readResults]);
-        turns++;
+        if (controller.signal.aborted) return;
+        agentContext = [...agentContext, { role: "assistant", content: result.text }, readResults];
+        turn++;
+        result = await runTurn(agentContext, turn);
       }
 
-      setAgentPhase("applying");
-      setAgentProgress(estimateProgress("applying", 0, effSettings.maxOutputTokens));
-      if (projectRoot && /```devtopflow:file/.test(assistantText)) {
-        const applied = await applyFileDirectives(projectRoot, assistantText);
-        if (applied.length > 0) {
-          const summary = applied
-            .map((f) => (f.ok ? `✅ Created \`${f.path}\`` : `❌ \`${f.path}\` — ${f.error}`))
-            .join("\n");
-          trailing.push({ role: "assistant", content: summary });
-          render();
-          await refreshTree();
-        } else {
-          // The model clearly tried to write a file (the literal marker is in
-          // the text) but the fenced block didn't parse — surface that instead
-          // of silently doing nothing, which is what made this look broken.
-          trailing.push({
-            role: "assistant",
-            content:
-              "⚠️ It looks like a file-creation block didn't parse correctly (often caused by a nested ``` fence inside the file's own contents, e.g. a markdown file with code examples). No file was written — try asking again, or ask for that one file on its own.",
-          });
-          render();
-        }
+      if (result.failed) {
+        setSupervisorWarning({ reason: { kind: "request-failed" }, sessionId });
+        return;
+      }
+
+      // File/image blocks from every turn of this task, in order (a later
+      // block for the same path simply overwrites an earlier one).
+      const taskText = trailing
+        .filter((m) => !m.meta)
+        .map((m) => m.content)
+        .join("\n\n");
+
+      if (projectRoot && /```devtopflow:file/.test(taskText)) {
+        const planned = extractFileDirectives(taskText).map((d) => d.path);
+        patchTask(sessionId, { phase: "writing", detail: planned.join(", ") });
+        const applied = await applyFileDirectives(projectRoot, taskText);
+        trailing.push(
+          applied.length > 0
+            ? {
+                role: "assistant",
+                meta: applied.every((f) => f.ok) ? "notice" : "error",
+                content: applied
+                  .map((f) => (f.ok ? `✅ ${t("chat.fileWritten")} \`${f.path}\`` : `❌ \`${f.path}\` — ${f.error}`))
+                  .join("\n"),
+              }
+            : { role: "assistant", meta: "error", content: t("chat.fileBlockUnparsed") }
+        );
+        render(true);
+        if (applied.length > 0) await refreshTree();
       }
 
       // Image blocks (devtopflow:draw / devtopflow:image) — the only way real
-      // .png/.jpg bytes ever get written, since devtopflow:file writes text.
-      // Runs after the text files so a scaffolded project's images land in
-      // folders its own files may have just created.
-      if (projectRoot && /```devtopflow:(image|draw)/.test(assistantText)) {
-        trailing.push({ role: "assistant", content: "🎨 Creating image(s)…" });
-        render();
-        const images = await applyImageDirectives(projectRoot, assistantText, {
+      // .png/.jpg bytes get written. Runs after the text files so images can
+      // land in folders those files just created.
+      if (projectRoot && /```devtopflow:(image|draw)/.test(taskText)) {
+        patchTask(sessionId, { phase: "imaging", detail: undefined });
+        const images = await applyImageDirectives(projectRoot, taskText, {
           openaiKey: apiKeys.openai,
           signal: controller.signal,
         });
@@ -1092,10 +1186,8 @@ export default function App() {
           } else if (img.kind === "drawn") {
             lines.push(`🖼 Created \`${img.path}\` (rendered from ${img.detail})`);
           } else {
-            // Generated images are billed per image rather than per token, so
-            // they're priced here and folded into the same session/budget
-            // totals as chat usage — otherwise they'd spend real money
-            // invisibly, outside the budget cap entirely.
+            // Generated images are billed per image, not per token — fold
+            // them into the same session/budget totals as chat usage.
             const cost = estimateImageCost(img.size ?? "1024x1024", img.quality ?? "medium");
             updateSession(sessionId, (s) => ({
               ...s,
@@ -1105,28 +1197,52 @@ export default function App() {
             lines.push(`🖼 Generated \`${img.path}\` (${img.detail}) — ${formatCost(cost)}`);
           }
         }
-        trailing[trailing.length - 1] = {
+        trailing.push({
           role: "assistant",
-          content:
-            lines.length > 0
-              ? lines.join("\n")
-              : '⚠️ An image block didn\'t parse correctly — no image was written. Each devtopflow:image / devtopflow:draw block needs a path="…" attribute ending in .png or .jpg on its opening fence.',
-        };
-        render();
+          meta: images.length > 0 && images.every((i) => i.ok) ? "notice" : "error",
+          content: lines.length > 0 ? lines.join("\n") : t("chat.imageBlockUnparsed"),
+        });
+        render(true);
         await refreshTree();
         await showCreatedImages(images.filter((i) => i.ok && i.absolutePath).map((i) => i.absolutePath!));
       }
+    };
 
-      setAgentPhase("finalizing");
-      setAgentProgress(1);
+    try {
+      await runTask();
+    } catch (e) {
+      if (!controller.signal.aborted) {
+        trailing.push({
+          role: "assistant",
+          meta: "error",
+          content: t("chat.unexpectedError", { error: e instanceof Error ? e.message : String(e) }),
+        });
+      }
+    } finally {
+      if (controller.signal.aborted) {
+        const reason = abortReason ?? { kind: "manual" as const };
+        const last = trailing[trailing.length - 1];
+        if (last && last.role === "assistant" && !last.meta && !last.content.trim()) trailing.pop();
+        trailing.push({
+          role: "assistant",
+          content: t(supervisorStopMessageKey(reason)),
+          meta: reason.kind === "manual" ? "notice" : "error",
+        });
+        if (isResumable(reason)) setSupervisorWarning({ reason, sessionId });
+      }
+      render(true);
+      taskControllersRef.current.delete(sessionId);
+      setTasks((prev) => {
+        const next = { ...prev };
+        delete next[sessionId];
+        return next;
+      });
     }
   };
 
   const handleSend = async (text: string) => {
-    // The budget chip/bar used to be purely informational — going red never
-    // actually stopped anything, so a set limit was more of a suggestion
-    // than a cap. A hard stop here (with an explicit override, same pattern
-    // as the other guard rails in this file) makes it a real cap.
+    if (isSending) return;
+    // A hard budget cap, with an explicit override.
     if (budget.limitUsd > 0 && budget.totalUsd >= budget.limitUsd) {
       const proceed = confirm(
         `You've reached your $${budget.limitUsd.toFixed(2)} budget limit (tracked so far: $${budget.totalUsd.toFixed(4)}). Send this message anyway?`
@@ -1148,14 +1264,21 @@ export default function App() {
   };
 
   /**
-   * Re-enters the same task after a supervisor stop (loop/turn/tool-call
-   * limit, stall, or the absolute timeout), bypassing those specific limits
-   * for this one attempt. Manual Stop/Esc/⌘C/@stop still works mid-resume —
-   * only the automatic supervisor limits are lifted, not the ability to stop.
+   * Retry after a failure, or "Resume anyway" after a supervisor stop:
+   * re-runs the task from the last user message (dropping the failed
+   * attempt's partial output and notices), with supervisor limits lifted for
+   * the resume case. Manual Stop/Esc/⌘C/@stop still works throughout.
    */
   const resumeAnyway = async () => {
+    const reason = supervisorWarning?.reason;
     setSupervisorWarning(undefined);
-    await runAgentTask(activeSessionId, activeSession.messages, effectiveAgentSettings, true);
+    let lastUser = -1;
+    activeSession.messages.forEach((m, i) => {
+      if (m.role === "user" && !m.meta) lastUser = i;
+    });
+    if (lastUser < 0) return;
+    const bypass = !!reason && !isRetryable(reason);
+    await runAgentTask(activeSessionId, activeSession.messages.slice(0, lastUser + 1), effectiveAgentSettings, bypass);
   };
 
   // Images cost real tokens too (roughly proportional to resolution) — the
@@ -1183,8 +1306,8 @@ export default function App() {
       className="app-shell"
       style={{ gridTemplateColumns: `${effectiveSidebarWidth}px 1fr ${effectiveChatWidth}px` }}
     >
-      {(isSending || modelsLoading || isOpeningFolder) && (
-        <div className={`global-progress ${agentPhase === "stalled" ? "stalled" : ""}`} aria-label="Working" />
+      {(anyTaskRunning || modelsLoading || isOpeningFolder) && (
+        <div className={`global-progress ${activeTask?.stalledSince ? "stalled" : ""}`} aria-label="Working" />
       )}
       <div className="titlebar">
         <div className="brand">
@@ -1217,12 +1340,14 @@ export default function App() {
       {!sidebarCollapsed && (
         <Sidebar
           projectRoot={projectRoot}
-          rootEntries={rootEntries}
           activePath={openPath}
+          refreshKey={treeRefreshKey}
           onOpenFolder={openFolder}
           onRefresh={refreshTree}
           onOpenFile={openFile}
           onCreateFile={createNewFile}
+          onPathMoved={handlePathMoved}
+          onPathDeleted={handlePathDeleted}
         />
       )}
       <div className="editor-column">
@@ -1244,7 +1369,11 @@ export default function App() {
           <div className="terminal-resize-handle" onMouseDown={startTerminalResize} />
         )}
         <div style={{ height: terminalOpen ? terminalHeight : 0, flexShrink: 0 }}>
-          <TerminalPanel projectRoot={projectRoot} visible={terminalOpen} />
+          {(terminalOpen || terminalStarted) && (
+            <Suspense fallback={null}>
+              <TerminalPanel projectRoot={projectRoot} visible={terminalOpen} />
+            </Suspense>
+          )}
         </div>
       </div>
       {!chatCollapsed && (
@@ -1261,7 +1390,7 @@ export default function App() {
           onAttachFromDisk={attachFilesFromDisk}
           onAttachImageData={attachPastedImage}
           onRemoveAttachment={removePendingAttachment}
-          isSending={isSending}
+          taskStatus={activeTask}
           onStop={stopCurrentTask}
           onNewChat={newChat}
           estimatedTokens={estimatedTokens}
@@ -1270,8 +1399,6 @@ export default function App() {
           onSwitchSession={switchSession}
           onDeleteSession={deleteSession}
           projectRoot={projectRoot}
-          agentPhase={agentPhase}
-          agentProgress={agentProgress}
           overContextLimit={overContextLimit}
           contextLimit={effectiveAgentSettings.contextLimit}
           supervisorWarningText={activeSupervisorWarning ? t(supervisorStopMessageKey(activeSupervisorWarning)) : undefined}

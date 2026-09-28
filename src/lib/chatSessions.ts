@@ -35,6 +35,7 @@ const OLD_PER_FOLDER_PREFIX = "devtopflow.sessions."; // brief localStorage-per-
 export const WELCOME_MESSAGE: ChatMessage = {
   role: "assistant",
   content: "Hi — I'm DevTop Flow. Set an API key (⚙ in the sidebar) or run Ollama locally, then ask away.",
+  meta: "notice",
 };
 
 function makeId(): string {
@@ -78,6 +79,7 @@ function parseStored(raw: string): { sessions: ChatSession[]; activeId: string }
 }
 
 export async function loadSessions(projectRoot: string | undefined): Promise<{ sessions: ChatSession[]; activeId: string }> {
+  await pendingWrites.get(projectRoot);
   if (projectRoot) {
     try {
       const found = parseStored(await readFile(historyPath(projectRoot)));
@@ -132,8 +134,23 @@ export async function loadSessions(projectRoot: string | undefined): Promise<{ s
   return { sessions: [fresh], activeId: fresh.id };
 }
 
-export async function saveSessions(projectRoot: string | undefined, sessions: ChatSession[], activeId: string): Promise<void> {
+// Serialize writes per project: a slow earlier save must never overwrite a
+// newer snapshot, and reopening a project waits for its last queued save.
+const pendingWrites = new Map<string | undefined, Promise<void>>();
+
+export function saveSessions(projectRoot: string | undefined, sessions: ChatSession[], activeId: string): Promise<void> {
   const payload = JSON.stringify({ sessions, activeId });
+  const previous = pendingWrites.get(projectRoot) ?? Promise.resolve();
+  const next = previous.catch(() => {}).then(() => persistSessions(projectRoot, payload));
+  pendingWrites.set(projectRoot, next);
+  const cleanup = () => {
+    if (pendingWrites.get(projectRoot) === next) pendingWrites.delete(projectRoot);
+  };
+  void next.then(cleanup, cleanup);
+  return next;
+}
+
+async function persistSessions(projectRoot: string | undefined, payload: string): Promise<void> {
   if (projectRoot) {
     try {
       await createFile(historyPath(projectRoot), payload);

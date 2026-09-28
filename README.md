@@ -30,8 +30,10 @@ devtop-flow/
 ```
 
 - **Real file I/O** — Open Folder (native picker) → lazy-loaded file tree → click to open in Monaco → Cmd+S to save.
+- **Explorer** — new file / new folder, rename (F2), move to Trash (⌘⌫), drag-and-drop to move, drop files in from Finder, keyboard navigation. Open tabs follow renamed/moved files.
 - **Model abstraction layer** — one `ModelProvider` interface, adapters for Anthropic (SSE), OpenAI-compatible (shared by ChatGPT & DeepSeek), and Ollama (NDJSON, auto-detected on `localhost:11434` at startup).
 - **Settings (⚙ in the sidebar)** — paste an API key → stored in the macOS Keychain via `save_api_key`/`get_api_key`/`delete_api_key` Tauri commands, never in plaintext config.
+- **Live task status** — while a prompt runs, a status strip shows the real phase (connecting / thinking / writing / reading files / writing files), elapsed time and tokens, and warns when the model goes silent. See [CHANGELOG.md](CHANGELOG.md).
 - **Chat panel** — model picker (built from whichever providers have a key set, plus any detected local Ollama models), streaming responses, "📎 Attach" to send the active file or current selection as context, rough token-count indicator.
 - **Image creation** — the agent can write real `.png`/`.jpg` files into the open project, two ways. A ` ```devtopflow:draw ` block has it write SVG that the app rasterizes locally (free, offline, exact — works with Claude, DeepSeek and local Ollama models, none of which have an image endpoint); a ` ```devtopflow:image ` block calls OpenAI's `gpt-image-1` for photographic/illustrative output (needs the OpenAI key, billed per image against the same budget monitor as chat). Both are confined to the open folder and must target `.png`/`.jpg`; the result opens straight into a preview tab. Creating a `.png`/`.jpg` from the Explorer's new-file button writes a real blank canvas rather than an unopenable zero-byte file.
 

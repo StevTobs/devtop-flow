@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ChatMessage, ModelProvider } from "../lib/modelProvider";
 import { buildFileTree } from "../lib/fileSystem";
 import { ATTACHMENT_PREFIX, attachmentSummaryLine } from "../lib/contextBuilder";
-import { AgentPhase } from "../lib/taskSupervisor";
+import { AgentPhase, TaskStatus } from "../lib/taskSupervisor";
 import { useI18n, type TranslationKey } from "../lib/i18n";
 
 export interface SessionSummary {
@@ -58,79 +58,62 @@ function renderInline(text: string, keyPrefix: string): (string | JSX.Element)[]
 }
 
 const PHASE_LABEL_KEY: Record<AgentPhase, TranslationKey> = {
-  idle: "phase.idle",
-  parsing: "phase.parsing",
+  connecting: "phase.connecting",
   waiting: "phase.waiting",
+  thinking: "phase.thinking",
   streaming: "phase.streaming",
-  applying: "phase.applying",
-  finalizing: "phase.finalizing",
-  stalled: "phase.stalled",
+  reading: "phase.reading",
+  writing: "phase.writing",
+  imaging: "phase.imaging",
 };
 
-/** NERV-terminal-style "thinking" readout — flickering text + scanline, driven by the real task phase (agent-control-panel-prompt.md §3) instead of an arbitrary cosmetic cycle. */
-function ThinkingReadout({ phase }: { phase: AgentPhase }) {
-  const { t } = useI18n();
-  return (
-    <span className={`thinking-eva ${phase === "stalled" ? "thinking-eva-stalled" : ""}`} aria-label="Thinking">
-      <span className="thinking-eva-text">{t(PHASE_LABEL_KEY[phase]) || t("phase.waiting")}</span>
-      <span className="thinking-eva-cursor">▊</span>
-      <span className="thinking-eva-scan" />
-    </span>
-  );
+function formatElapsed(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`;
+}
+
+/** Re-renders every `intervalMs` while mounted — for wall-clock readouts. */
+function useNow(intervalMs: number): number {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), intervalMs);
+    return () => clearInterval(id);
+  }, [intervalMs]);
+  return now;
 }
 
 /**
- * Circular task timer — the ring reflects the real phase-based progress
- * estimate (agent-control-panel-prompt.md §3: parsing/waiting/streaming
- * scaled by tokens received/applying/finalizing), not a fake animation, so a
- * stalled task visibly stops climbing instead of quietly faking its way to
- * 100%. The elapsed-seconds label is still just a wall clock, independent of
- * phase.
+ * Live status of the running task, pinned just above the input so it's
+ * visible no matter where the transcript is scrolled. Everything shown comes
+ * from real stream signals (see TaskStatus) — the phase, the output size, and
+ * how long it's been since the model last sent anything when that gets long.
  */
-function TaskTimer({ isSending, phase, progress }: { isSending: boolean; phase: AgentPhase; progress: number }) {
+function AgentStatusBar({ status, onStop }: { status: TaskStatus; onStop: () => void }) {
   const { t } = useI18n();
-  const [elapsedMs, setElapsedMs] = useState(0);
-  const startRef = useRef(0);
-
-  useEffect(() => {
-    if (!isSending) return;
-    startRef.current = Date.now();
-    setElapsedMs(0);
-    const id = setInterval(() => setElapsedMs(Date.now() - startRef.current), 150);
-    return () => clearInterval(id);
-  }, [isSending]);
-
-  if (!isSending) return null;
-
-  const seconds = elapsedMs / 1000;
-  const size = 26;
-  const strokeWidth = 3;
-  const radius = (size - strokeWidth) / 2;
-  const circumference = 2 * Math.PI * radius;
-  const dashOffset = circumference * (1 - Math.min(Math.max(progress, 0), 1));
-
+  const now = useNow(250);
+  const stalled = status.stalledSince !== undefined;
+  const label = stalled
+    ? t("phase.stalled", {
+        idle: formatElapsed(now - status.stalledSince! + status.timeoutMs * 0.25),
+        limit: formatElapsed(status.timeoutMs),
+      })
+    : t(PHASE_LABEL_KEY[status.phase]);
   return (
-    <span
-      className={`task-timer ${phase === "stalled" ? "task-timer-stalled" : ""}`}
-      title={`${t(PHASE_LABEL_KEY[phase]) || "Working"} — running for ${Math.floor(seconds)}s`}
-    >
-      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
-        <circle className="task-timer-track" cx={size / 2} cy={size / 2} r={radius} strokeWidth={strokeWidth} fill="none" />
-        <circle
-          className="task-timer-fill"
-          cx={size / 2}
-          cy={size / 2}
-          r={radius}
-          strokeWidth={strokeWidth}
-          fill="none"
-          strokeDasharray={circumference}
-          strokeDashoffset={dashOffset}
-          strokeLinecap="round"
-          transform={`rotate(-90 ${size / 2} ${size / 2})`}
-        />
-      </svg>
-      <span className="task-timer-label">{Math.floor(seconds)}s</span>
-    </span>
+    <div className={`agent-status ${stalled ? "stalled" : ""}`} role="status" aria-live="polite">
+      <span className={`agent-status-spinner phase-${status.phase}`} />
+      <span className="agent-status-text">
+        <span className="agent-status-label">{label}</span>
+        {status.detail && !stalled && <span className="agent-status-detail">{status.detail}</span>}
+      </span>
+      <span className="agent-status-meta">
+        {status.turn > 1 && <span title={t("status.turnTooltip")}>{t("status.turn", { n: status.turn })}</span>}
+        {status.outputTokens > 0 && <span>~{status.outputTokens.toLocaleString()} tok</span>}
+        <span>{formatElapsed(now - status.startedAt)}</span>
+      </span>
+      <button className="agent-status-stop" onClick={onStop} title={t("chat.stopTitle")}>
+        {t("chat.stop")}
+      </button>
+    </div>
   );
 }
 
@@ -214,6 +197,8 @@ function MessageContent({ content }: { content: string }) {
 }
 
 interface ChatPanelProps {
+  /** Status of the task running in this chat, if any. */
+  taskStatus?: TaskStatus;
   providers: ModelProvider[];
   activeProviderId?: string;
   onSelectProvider: (id: string) => void;
@@ -226,7 +211,6 @@ interface ChatPanelProps {
   onAttachFromDisk: () => void;
   onAttachImageData: (dataUrl: string) => void;
   onRemoveAttachment: (index: number) => void;
-  isSending: boolean;
   onStop: () => void;
   onNewChat: () => void;
   estimatedTokens?: number;
@@ -235,8 +219,6 @@ interface ChatPanelProps {
   onSwitchSession: (id: string) => void;
   onDeleteSession: (id: string) => void;
   projectRoot?: string;
-  agentPhase: AgentPhase;
-  agentProgress: number;
   overContextLimit?: boolean;
   contextLimit?: number;
   supervisorWarningText?: string;
@@ -258,7 +240,7 @@ export default function ChatPanel({
   onAttachFromDisk,
   onAttachImageData,
   onRemoveAttachment,
-  isSending,
+  taskStatus,
   onStop,
   onNewChat,
   estimatedTokens,
@@ -267,8 +249,6 @@ export default function ChatPanel({
   onSwitchSession,
   onDeleteSession,
   projectRoot,
-  agentPhase,
-  agentProgress,
   overContextLimit,
   contextLimit,
   supervisorWarningText,
@@ -277,6 +257,7 @@ export default function ChatPanel({
   onDismissWarning,
 }: ChatPanelProps) {
   const { t } = useI18n();
+  const isSending = !!taskStatus;
   const [draft, setDraft] = useState("");
   const [historyOpen, setHistoryOpen] = useState(false);
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
@@ -318,7 +299,7 @@ export default function ChatPanel({
     if (el && stickToBottomRef.current) {
       el.scrollTop = el.scrollHeight;
     }
-  }, [messages]);
+  }, [messages, isSending]);
 
   useEffect(() => {
     stickToBottomRef.current = true;
@@ -357,6 +338,8 @@ export default function ChatPanel({
       setPendingDraft("");
       return;
     }
+    // One task per chat at a time — the draft stays put until this one ends.
+    if (isSending) return;
     onSend(draft);
     setDraft("");
     setHistoryIndex(-1);
@@ -421,12 +404,6 @@ export default function ChatPanel({
         <span className="session-cost" title={t("chat.sessionCostTooltip")}>
           {sessionCost && sessionCost.usd > 0 && `$${sessionCost.usd.toFixed(4)} · ฿${sessionCost.thb.toFixed(2)}`}
         </span>
-        <TaskTimer isSending={isSending} phase={agentPhase} progress={agentProgress} />
-        {isSending && (
-          <button className="text-btn stop-btn" onClick={onStop} title={t("chat.stopTitle")}>
-            {t("chat.stop")} <span className="kbd-inline">@stop</span> <span className="kbd-inline">Esc</span> <span className="kbd-inline">⌘C</span>
-          </button>
-        )}
         <button className="text-btn" onClick={onNewChat} title={t("chat.newChatTitle")}>
           {t("chat.newChat")}
         </button>
@@ -493,14 +470,28 @@ export default function ChatPanel({
       <div className="chat-messages" ref={messagesRef} onScroll={handleMessagesScroll}>
         {messages.map((m, i) => {
           const isAttachment = m.role === "user" && m.content.startsWith(ATTACHMENT_PREFIX);
-          const isThinking = m.role === "assistant" && m.content === "" && i === messages.length - 1;
+          const isLast = i === messages.length - 1;
+          const isLive = isSending && isLast && m.role === "assistant" && !m.meta;
+          const isPending = isLive && m.content === "";
+          // A stopped request can leave an empty assistant turn behind — nothing to show.
+          if (!isLive && m.role === "assistant" && !m.content.trim()) return null;
           return (
             <div
               key={i}
-              className={`chat-bubble ${m.role === "user" ? "user" : "assistant"} ${isAttachment ? "attachment" : ""}`}
+              className={[
+                "chat-bubble",
+                m.role === "user" ? "user" : "assistant",
+                isAttachment ? "attachment" : "",
+                m.meta ? `meta meta-${m.meta}` : "",
+                isLive && !isPending ? "streaming" : "",
+              ].join(" ")}
             >
-              {isThinking ? (
-                <ThinkingReadout phase={agentPhase} />
+              {isPending ? (
+                <span className="typing-dots" aria-label={t(PHASE_LABEL_KEY[taskStatus!.phase])}>
+                  <span />
+                  <span />
+                  <span />
+                </span>
               ) : isAttachment ? (
                 <>
                   {m.image && (
@@ -520,6 +511,8 @@ export default function ChatPanel({
           );
         })}
       </div>
+
+      {taskStatus && <AgentStatusBar status={taskStatus} onStop={onStop} />}
 
       <div className="chat-input">
         <div className="chat-input-toolbar">
@@ -591,19 +584,35 @@ export default function ChatPanel({
             )}
           </span>
         </div>
-        <textarea
-          ref={textareaRef}
-          className="chat-textarea"
-          rows={3}
-          placeholder={isSending ? t("chat.placeholderSending") : t("chat.placeholderIdle")}
-          value={draft}
-          onChange={(e) => {
-            setDraft(e.target.value);
-            if (historyIndex !== -1) setHistoryIndex(-1);
-          }}
-          onKeyDown={handleKeyDown}
-          onPaste={handlePaste}
-        />
+        <div className="chat-compose">
+          <textarea
+            ref={textareaRef}
+            className="chat-textarea"
+            rows={3}
+            placeholder={isSending ? t("chat.placeholderSending") : t("chat.placeholderIdle")}
+            value={draft}
+            onChange={(e) => {
+              setDraft(e.target.value);
+              if (historyIndex !== -1) setHistoryIndex(-1);
+            }}
+            onKeyDown={handleKeyDown}
+            onPaste={handlePaste}
+          />
+          {isSending ? (
+            <button className="chat-send-btn stop" onClick={onStop} title={t("chat.stopTitle")}>
+              ■
+            </button>
+          ) : (
+            <button
+              className="chat-send-btn"
+              onClick={submit}
+              disabled={!draft.trim() || providers.length === 0}
+              title={t("chat.sendTitle")}
+            >
+              ↑
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );

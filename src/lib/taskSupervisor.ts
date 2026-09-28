@@ -1,26 +1,50 @@
 // Runaway / overrun protection (agent-control-panel-prompt.md §2) and the
-// phase-based progress model (§3) that reads off the same real signals —
-// a stalled task shows as stalled, not as a bar quietly faking its way to 100%.
+// live task status the chat panel shows while a prompt is in flight. Status
+// is driven only by real signals from the provider stream (headers received,
+// thinking deltas, text deltas, keep-alive pings) — never by a timer that
+// pretends to make progress.
 
-export type AgentPhase = "idle" | "parsing" | "waiting" | "streaming" | "applying" | "finalizing" | "stalled";
+export type AgentPhase =
+  | "connecting" // request sent, no response headers yet
+  | "waiting" // connected, model hasn't produced anything visible yet
+  | "thinking" // extended-thinking / reasoning tokens arriving
+  | "streaming" // answer text arriving
+  | "reading" // agent reading project files between turns
+  | "writing" // writing files the model produced
+  | "imaging"; // rendering / generating images
+
+export interface TaskStatus {
+  phase: AgentPhase;
+  startedAt: number;
+  /** 1-based model turn within this task (file-read round trips add turns). */
+  turn: number;
+  /** Rough output size so far (chars/4 until the provider reports real usage). */
+  outputTokens: number;
+  /** Extra context for the phase — e.g. which files are being read/written. */
+  detail?: string;
+  /** Set while no stream activity has arrived for a while; cleared when activity resumes. */
+  stalledSince?: number;
+  /** The per-turn no-activity timeout, so the UI can say how long it will keep waiting. */
+  timeoutMs: number;
+}
 
 export type SupervisorStopReason =
   | { kind: "manual" }
-  | { kind: "absolute-timeout" }
   | { kind: "turn-stall" }
+  | { kind: "request-failed" }
   | { kind: "loop-detected" }
   | { kind: "max-turns" }
   | { kind: "max-tool-calls" };
 
-/** Translation key for each stop reason's message — kept as a lookup here so callers (App.tsx, ChatPanel.tsx) share one mapping instead of duplicating it. The actual strings live in lib/i18n.tsx. */
+/** Translation key for each stop reason's message — the actual strings live in lib/i18n.tsx. */
 export function supervisorStopMessageKey(reason: SupervisorStopReason) {
   switch (reason.kind) {
     case "manual":
       return "supervisor.manual" as const;
-    case "absolute-timeout":
-      return "supervisor.absoluteTimeout" as const;
     case "turn-stall":
       return "supervisor.turnStall" as const;
+    case "request-failed":
+      return "supervisor.requestFailed" as const;
     case "loop-detected":
       return "supervisor.loopDetected" as const;
     case "max-turns":
@@ -30,22 +54,21 @@ export function supervisorStopMessageKey(reason: SupervisorStopReason) {
   }
 }
 
-/** Only supervisor-triggered stops (not a manual stop) offer a way to continue — the user explicitly asked to stop in the manual case. */
+/** Only non-manual stops offer a way to continue — the user explicitly asked to stop in the manual case. */
 export function isResumable(reason: SupervisorStopReason): boolean {
   return reason.kind !== "manual";
 }
 
-/** A no-response/stall/timeout is a plain "it failed, try again" — bypassing supervisor limits (the other reasons: loop/max-turns/max-tool-calls) isn't the right mental model for it, so it gets its own "Retry" wording instead of "Resume anyway". */
+/** Failures (no response, request error) get a plain "Retry"; supervisor limits get "Resume anyway". */
 export function isRetryable(reason: SupervisorStopReason): boolean {
-  return reason.kind === "turn-stall" || reason.kind === "absolute-timeout";
+  return reason.kind === "turn-stall" || reason.kind === "request-failed";
 }
 
 /**
- * Watches for stream activity (token or tool-call progress) and fires a
- * two-stage warning: `onWarn` partway through the budget (surfaced as the
- * "stalled" phase so the UI can show a distinct warning state before the
- * hard cutoff), then `onTimeout` if nothing arrives before the deadline.
- * `ping()` resets the clock and clears any warning once activity resumes.
+ * Watches for stream activity and fires a two-stage warning: `onWarn` once
+ * nothing has arrived for `warnAtRatio` of the budget, then `onTimeout` if
+ * nothing arrives before the deadline. `ping()` resets the clock and clears
+ * any warning once activity resumes.
  */
 export function createStallWatcher(opts: {
   timeoutMs: number;
@@ -54,34 +77,25 @@ export function createStallWatcher(opts: {
   onRecovered: () => void;
   onTimeout: () => void;
 }) {
-  // Was 0.6 (54s of dead air on the 90s default before any visible warning) —
-  // a real no-response case left the UI showing a plain "SYNCHRONIZING" with
-  // no hint anything was wrong for the whole first minute. 0.3 surfaces the
-  // "stalled" phase in ~27s instead, well before most users would conclude
-  // it's broken and give up on their own.
-  const warnAtRatio = opts.warnAtRatio ?? 0.3;
+  const warnAtRatio = opts.warnAtRatio ?? 0.25;
   let lastActivity = Date.now();
   let warned = false;
   let stopped = false;
-  let timeoutId: ReturnType<typeof setTimeout>;
-
-  const arm = () => {
-    clearTimeout(timeoutId);
-    timeoutId = setTimeout(() => {
-      if (!stopped) opts.onTimeout();
-    }, opts.timeoutMs);
-  };
 
   const checkId = setInterval(() => {
     if (stopped) return;
     const idle = Date.now() - lastActivity;
+    if (idle >= opts.timeoutMs) {
+      stopped = true;
+      clearInterval(checkId);
+      opts.onTimeout();
+      return;
+    }
     if (idle > opts.timeoutMs * warnAtRatio && !warned) {
       warned = true;
       opts.onWarn();
     }
-  }, 400);
-
-  arm();
+  }, 500);
 
   return {
     ping() {
@@ -90,35 +104,12 @@ export function createStallWatcher(opts: {
         warned = false;
         opts.onRecovered();
       }
-      arm();
     },
     stop() {
       stopped = true;
-      clearTimeout(timeoutId);
       clearInterval(checkId);
     },
   };
-}
-
-/** Phase-based progress estimate, weighted by expected cost/time per phase. */
-export function estimateProgress(phase: AgentPhase, tokensReceived: number, estimatedMaxTokens: number): number {
-  switch (phase) {
-    case "idle":
-      return 0;
-    case "parsing":
-      return 0.05;
-    case "waiting":
-    case "stalled":
-      return 0.1;
-    case "streaming": {
-      const ratio = estimatedMaxTokens > 0 ? tokensReceived / estimatedMaxTokens : 0;
-      return 0.15 + Math.min(ratio, 1) * 0.75;
-    }
-    case "applying":
-      return 0.92;
-    case "finalizing":
-      return 1.0;
-  }
 }
 
 /** Stable key for a set of requested read paths, order-independent — used to detect the model re-requesting the exact same file(s) with no new progress. */

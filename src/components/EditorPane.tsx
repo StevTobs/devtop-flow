@@ -121,7 +121,7 @@ export default function EditorPane({
   // now-stale value/tab clobbering a newer one that resolved first.
   const [htmlPreviewDoc, setHtmlPreviewDoc] = useState<string>();
   useEffect(() => {
-    if (!isHtml || !activeTabPath) {
+    if (!showPreview || !isHtml || !activeTabPath) {
       setHtmlPreviewDoc(undefined);
       return;
     }
@@ -135,13 +135,14 @@ export default function EditorPane({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [isHtml, activeTabPath, value]);
+  }, [showPreview, isHtml, activeTabPath, value]);
 
   const previewSrc = useMemo(() => {
+    if (!showPreview) return undefined;
     if (isHtml) return htmlPreviewDoc ? { kind: "html" as const, doc: htmlPreviewDoc } : undefined;
     if (isSvg) return { kind: "svg" as const, url: svgTextToDataUrl(value) };
     return undefined;
-  }, [isHtml, isSvg, value, htmlPreviewDoc]);
+  }, [showPreview, isHtml, isSvg, value, htmlPreviewDoc]);
 
   if (tabs.length === 0) {
     return (

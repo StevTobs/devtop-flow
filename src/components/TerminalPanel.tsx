@@ -43,25 +43,51 @@ export default function TerminalPanel({ projectRoot, visible }: TerminalPanelPro
     let unlistenClosed: UnlistenFn | undefined;
     let cancelled = false;
 
-    invoke<number>("terminal_start", { cwd: projectRoot ?? "" }).then(async (id) => {
-      if (cancelled) {
-        invoke("terminal_kill", { id });
-        return;
+    let sessionId: number | undefined;
+    const killSession = () => {
+      if (sessionId === undefined) return;
+      const id = sessionId;
+      sessionId = undefined;
+      if (sessionIdRef.current === id) sessionIdRef.current = undefined;
+      void invoke("terminal_kill", { id }).catch(console.error);
+    };
+    const start = async () => {
+      try {
+        const id = await invoke<number>("terminal_start", { cwd: projectRoot ?? "" });
+        sessionId = id;
+        if (cancelled) { killSession(); return; }
+        const output = await listen<string>(`terminal-output-${id}`, (e) => {
+          if (!cancelled) term.write(e.payload);
+        });
+        if (cancelled) { output(); killSession(); return; }
+        unlistenOutput = output;
+        const closed = await listen(`terminal-closed-${id}`, () => {
+          if (!cancelled) term.write("\r\n[process exited]\r\n");
+          killSession();
+        });
+        if (cancelled) { closed(); killSession(); return; }
+        unlistenClosed = closed;
+        if (sessionId === undefined) return;
+        sessionIdRef.current = id;
+        await invoke("terminal_resize", { id, cols: term.cols, rows: term.rows });
+      } catch (error) {
+        unlistenOutput?.();
+        unlistenClosed?.();
+        killSession();
+        if (!cancelled) term.write(`\r\n[Terminal failed: ${String(error)}]\r\n`);
       }
-      sessionIdRef.current = id;
-      unlistenOutput = await listen<string>(`terminal-output-${id}`, (e) => term.write(e.payload));
-      unlistenClosed = await listen(`terminal-closed-${id}`, () => term.write("\r\n[process exited]\r\n"));
-      invoke("terminal_resize", { id, cols: term.cols, rows: term.rows });
-    });
+    };
+    void start();
 
     const dataDisposable = term.onData((data) => {
-      if (sessionIdRef.current !== undefined) invoke("terminal_write", { id: sessionIdRef.current, data });
+      if (sessionIdRef.current !== undefined) void invoke("terminal_write", { id: sessionIdRef.current, data }).catch(console.error);
     });
 
     const resizeObserver = new ResizeObserver(() => {
+      if (!containerRef.current?.clientWidth || !containerRef.current?.clientHeight) return;
       fit.fit();
       if (sessionIdRef.current !== undefined) {
-        invoke("terminal_resize", { id: sessionIdRef.current, cols: term.cols, rows: term.rows });
+        void invoke("terminal_resize", { id: sessionIdRef.current, cols: term.cols, rows: term.rows }).catch(console.error);
       }
     });
     resizeObserver.observe(containerRef.current);
@@ -72,7 +98,11 @@ export default function TerminalPanel({ projectRoot, visible }: TerminalPanelPro
       dataDisposable.dispose();
       unlistenOutput?.();
       unlistenClosed?.();
-      if (sessionIdRef.current !== undefined) invoke("terminal_kill", { id: sessionIdRef.current });
+      killSession();
+      if (termRef.current === term) {
+        termRef.current = undefined;
+        fitRef.current = undefined;
+      }
       term.dispose();
     };
     // Deliberately mount-once: the PTY session and xterm instance both need
@@ -84,13 +114,14 @@ export default function TerminalPanel({ projectRoot, visible }: TerminalPanelPro
   // internal character-cell measurements go stale — re-fit once it's shown again.
   useEffect(() => {
     if (!visible) return;
-    requestAnimationFrame(() => {
+    const frame = requestAnimationFrame(() => {
       fitRef.current?.fit();
       const term = termRef.current;
       if (term && sessionIdRef.current !== undefined) {
-        invoke("terminal_resize", { id: sessionIdRef.current, cols: term.cols, rows: term.rows });
+        void invoke("terminal_resize", { id: sessionIdRef.current, cols: term.cols, rows: term.rows }).catch(console.error);
       }
     });
+    return () => cancelAnimationFrame(frame);
   }, [visible]);
 
   return (

@@ -31,6 +31,30 @@ export interface ChatMessage {
   role: Role;
   content: string;
   image?: ChatImage;
+  /**
+   * UI-only messages (stop/error notices, "✅ Created …" summaries, the
+   * welcome line) — shown in the transcript but never sent to the model, so a
+   * failed turn can't poison every later request with an error string or an
+   * empty assistant message.
+   */
+  meta?: "notice" | "error";
+}
+
+/**
+ * The subset of a transcript that is actually sent to a provider: drops
+ * UI-only meta messages, empty assistant turns (left behind by a stopped
+ * request — Anthropic rejects empty content blocks outright), and any
+ * assistant lines before the first user message (e.g. the welcome text).
+ */
+export function toRequestMessages(messages: ChatMessage[]): ChatMessage[] {
+  const out: ChatMessage[] = [];
+  for (const m of messages) {
+    if (m.meta) continue;
+    if (m.role === "assistant" && !m.content.trim()) continue;
+    if (m.role === "assistant" && !out.some((o) => o.role === "user")) continue;
+    out.push(m);
+  }
+  return out;
 }
 
 export type Vendor = "anthropic" | "openai" | "deepseek" | "ollama";
@@ -44,9 +68,16 @@ const THINKING_BUDGETS: Record<Exclude<ThinkingMode, "off">, number> = {
 };
 
 export interface StreamChunk {
+  /** Answer text to append. */
   delta: string;
   done: boolean;
   usage?: UsageInfo;
+  /** Reasoning/thinking tokens arrived (not part of the answer, but proof the model is working). */
+  thinking?: boolean;
+  /** Anything else arrived (headers, keep-alive ping, block start…) — keeps the stall watcher alive. */
+  activity?: "connected" | "ping";
+  /** Normalized stop reason when the provider reports one; "max_tokens" means the answer was cut off. */
+  stopReason?: "end" | "max_tokens" | string;
 }
 
 /** Per-request knobs from Agent Settings (agent-control-panel-prompt.md §1) — every provider gets the same shape, and ignores whatever it can't support. */
@@ -157,14 +188,29 @@ export class ClaudeProvider implements ModelProvider {
       }
     }
     await throwIfErrorResponse(res);
+    onChunk({ delta: "", done: false, activity: "connected" });
 
     let inputTokens = 0;
     let cacheReadTokens = 0;
     let cacheWriteTokens = 0;
 
     await streamSSE(res, (json) => {
-      if (json.type === "content_block_delta" && json.delta?.text) {
-        onChunk({ delta: json.delta.text, done: false });
+      if (json.type === "error") {
+        throw new Error(`${json.error?.type ?? "error"}: ${json.error?.message ?? "stream error"}`);
+      }
+      if (json.type === "content_block_delta") {
+        if (json.delta?.type === "text_delta" && json.delta.text) {
+          onChunk({ delta: json.delta.text, done: false });
+        } else if (json.delta?.type === "thinking_delta") {
+          onChunk({ delta: "", done: false, thinking: true });
+        } else {
+          onChunk({ delta: "", done: false, activity: "ping" });
+        }
+        return;
+      }
+      if (json.type === "content_block_start" && json.content_block?.type === "thinking") {
+        onChunk({ delta: "", done: false, thinking: true });
+        return;
       }
       if (json.type === "message_start") {
         const u = json.message?.usage;
@@ -175,9 +221,11 @@ export class ClaudeProvider implements ModelProvider {
         }
       }
       if (json.type === "message_delta" && json.usage) {
+        const stop = json.delta?.stop_reason;
         onChunk({
           delta: "",
           done: false,
+          stopReason: stop === "max_tokens" ? "max_tokens" : stop ? "end" : undefined,
           usage: {
             inputTokens,
             outputTokens: json.usage.output_tokens ?? 0,
@@ -186,7 +234,11 @@ export class ClaudeProvider implements ModelProvider {
           },
         });
       }
-      if (json.type === "message_stop") onChunk({ delta: "", done: true });
+      if (json.type === "message_stop") {
+        onChunk({ delta: "", done: true });
+        return;
+      }
+      onChunk({ delta: "", done: false, activity: "ping" });
     });
   }
 }
@@ -239,9 +291,14 @@ export class OpenAICompatibleProvider implements ModelProvider {
       signal: options?.signal,
     });
     await throwIfErrorResponse(res);
+    onChunk({ delta: "", done: false, activity: "connected" });
     await streamSSE(res, (json) => {
-      const delta = json.choices?.[0]?.delta?.content;
+      if (json.error) throw new Error(json.error.message ?? JSON.stringify(json.error));
+      const choiceDelta = json.choices?.[0]?.delta;
+      const delta = choiceDelta?.content;
       if (delta) onChunk({ delta, done: false });
+      else if (choiceDelta?.reasoning_content || choiceDelta?.reasoning) onChunk({ delta: "", done: false, thinking: true });
+      else onChunk({ delta: "", done: false, activity: "ping" });
       if (json.usage) {
         const u = json.usage;
         onChunk({
@@ -255,7 +312,8 @@ export class OpenAICompatibleProvider implements ModelProvider {
           },
         });
       }
-      if (json.choices?.[0]?.finish_reason) onChunk({ delta: "", done: true });
+      const finish = json.choices?.[0]?.finish_reason;
+      if (finish) onChunk({ delta: "", done: true, stopReason: finish === "length" ? "max_tokens" : "end" });
     });
   }
 }
@@ -298,8 +356,10 @@ export class OllamaProvider implements ModelProvider {
       }),
       signal: options?.signal,
     });
+    await throwIfErrorResponse(res);
+    onChunk({ delta: "", done: false, activity: "connected" });
     const reader = res.body?.getReader();
-    if (!reader) return;
+    if (!reader) throw new Error("Ollama returned no response body");
     const decoder = new TextDecoder();
     let buf = "";
     while (true) {
@@ -310,15 +370,23 @@ export class OllamaProvider implements ModelProvider {
       buf = lines.pop() ?? "";
       for (const line of lines) {
         if (!line.trim()) continue;
-        const json = JSON.parse(line);
+        let json: any;
+        try {
+          json = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (json.error) throw new Error(json.error);
         if (json.message?.content) onChunk({ delta: json.message.content, done: false });
+        else if (json.message?.thinking) onChunk({ delta: "", done: false, thinking: true });
+        else onChunk({ delta: "", done: false, activity: "ping" });
         if (json.done) {
           onChunk({
             delta: "",
             done: false,
             usage: { inputTokens: json.prompt_eval_count ?? 0, outputTokens: json.eval_count ?? 0 },
           });
-          onChunk({ delta: "", done: true });
+          onChunk({ delta: "", done: true, stopReason: json.done_reason === "length" ? "max_tokens" : "end" });
         }
       }
     }
@@ -345,10 +413,15 @@ async function throwIfErrorResponse(res: Response): Promise<void> {
   throw new Error(`HTTP ${res.status}: ${message}`);
 }
 
-/** Shared SSE reader for Anthropic / OpenAI-style `data: {...}` streams. */
+/**
+ * Shared SSE reader for Anthropic / OpenAI-style `data: {...}` streams. Only
+ * JSON parse failures (partial/keep-alive lines) are ignored — an error
+ * thrown by `onEvent` (e.g. a mid-stream `overloaded_error`) propagates so
+ * the caller can report it instead of ending with a silently truncated reply.
+ */
 async function streamSSE(res: Response, onEvent: (json: any) => void) {
   const reader = res.body?.getReader();
-  if (!reader) return;
+  if (!reader) throw new Error("Provider returned no response body");
   const decoder = new TextDecoder();
   let buf = "";
   while (true) {
@@ -357,15 +430,18 @@ async function streamSSE(res: Response, onEvent: (json: any) => void) {
     buf += decoder.decode(value, { stream: true });
     const lines = buf.split("\n");
     buf = lines.pop() ?? "";
-    for (const line of lines) {
+    for (const rawLine of lines) {
+      const line = rawLine.replace(/\r$/, "");
       if (!line.startsWith("data:")) continue;
       const data = line.slice(5).trim();
       if (data === "[DONE]") continue;
+      let json: any;
       try {
-        onEvent(JSON.parse(data));
+        json = JSON.parse(data);
       } catch {
-        /* ignore partial/non-JSON keepalive lines */
+        continue; // partial/non-JSON keepalive line
       }
+      onEvent(json);
     }
   }
 }

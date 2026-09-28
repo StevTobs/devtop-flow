@@ -39,6 +39,13 @@ fn delete_api_key(provider: String) -> Result<(), String> {
     }
 }
 
+/// Explorer "Delete" — moves to the Trash / Recycle Bin instead of erasing
+/// outright, so a mis-click in the file tree is always recoverable.
+#[tauri::command]
+fn move_to_trash(path: String) -> Result<(), String> {
+    trash::delete(&path).map_err(|e| e.to_string())
+}
+
 // Integrated terminal (VS Code-style, hideable panel). A real PTY — not just
 // a spawned process with captured stdout — so interactive programs, color
 // codes, cursor movement, and `cd` all behave normally. ConPTY on Windows via
@@ -148,6 +155,7 @@ fn main() {
             save_api_key,
             get_api_key,
             delete_api_key,
+            move_to_trash,
             terminal_start,
             terminal_write,
             terminal_resize,

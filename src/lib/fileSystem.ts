@@ -1,7 +1,11 @@
 import { open } from "@tauri-apps/plugin-dialog";
+import { invoke } from "@tauri-apps/api/core";
 import {
+  copyFile,
+  exists,
   mkdir,
   readDir,
+  rename,
   readFile as readBinaryFile,
   readTextFile,
   writeFile as writeBinaryFileRaw,
@@ -408,4 +412,130 @@ export function fileIconFor(name: string): FileIcon {
   if (FILE_ICONS_BY_NAME[lower]) return FILE_ICONS_BY_NAME[lower];
   const ext = lower.includes(".") ? (lower.split(".").pop() ?? "") : "";
   return FILE_ICONS[ext] ?? DEFAULT_FILE_ICON;
+}
+
+// --- Explorer file operations (new folder, rename, move, copy-in, delete) ---
+
+function sepOf(path: string): string {
+  return path.includes("\\") ? "\\" : "/";
+}
+
+/** Joins a directory and a (possibly nested, "/"-separated) relative name using the directory's own separator. */
+export function joinPath(dir: string, name: string): string {
+  const sep = sepOf(dir);
+  const cleanName = name.replace(/[\\/]+/g, sep).replace(new RegExp(`^\\${sep}+`), "");
+  return `${dir.replace(/[\\/]+$/, "")}${sep}${cleanName}`;
+}
+
+export function baseName(path: string): string {
+  return path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() ?? path;
+}
+
+/** True when `path` is `ancestor` itself or somewhere inside it. */
+export function isSameOrDescendant(path: string, ancestor: string): boolean {
+  const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
+  const a = norm(ancestor);
+  const p = norm(path);
+  return p === a || p.startsWith(`${a}/`);
+}
+
+/** Re-bases `path` from `oldPrefix` onto `newPrefix` (used to follow a moved/renamed folder's open tabs). */
+export function rebasePath(path: string, oldPrefix: string, newPrefix: string): string {
+  if (path === oldPrefix) return newPrefix;
+  return newPrefix + path.slice(oldPrefix.length);
+}
+
+/**
+ * Explorer name validation — returns an error message key, or undefined if
+ * the name is usable. Nested "a/b.ts" is allowed (creates the folders), like
+ * VS Code's new-file box.
+ */
+export function validateEntryName(name: string): "empty" | "invalid" | undefined {
+  const trimmed = name.trim();
+  if (!trimmed) return "empty";
+  if (/[<>:"|?*\u0000-\u001f]/.test(trimmed)) return "invalid";
+  const parts = trimmed.split(/[\\/]/).filter(Boolean);
+  if (parts.length === 0 || parts.some((p) => p === "." || p === "..")) return "invalid";
+  return undefined;
+}
+
+export async function pathExists(path: string): Promise<boolean> {
+  try {
+    return await exists(path);
+  } catch {
+    return false;
+  }
+}
+
+export async function createFolder(path: string): Promise<void> {
+  await mkdir(path, { recursive: true });
+}
+
+/**
+ * Renames/moves `from` to `to`, refusing to overwrite anything already there.
+ * A case-only rename ("readme.md" → "README.md") is allowed even though a
+ * case-insensitive filesystem (macOS default) reports the target as existing.
+ */
+export async function renamePath(from: string, to: string): Promise<void> {
+  if (from === to) return;
+  const caseOnly = from.toLowerCase() === to.toLowerCase();
+  if (!caseOnly && (await pathExists(to))) {
+    throw new Error(`"${baseName(to)}" already exists in that folder.`);
+  }
+  await rename(from, to);
+}
+
+/** Moves a file or folder into `destDir`, keeping its name. Returns the new path. */
+export async function movePath(src: string, destDir: string): Promise<string> {
+  if (isSameOrDescendant(destDir, src)) {
+    throw new Error(`Can't move "${baseName(src)}" into itself.`);
+  }
+  const target = joinPath(destDir, baseName(src));
+  await renamePath(src, target);
+  return target;
+}
+
+/** "name.ext" → "name copy.ext", "name copy 2.ext", … — first one that doesn't exist yet in `dir`. */
+async function uniqueNameIn(dir: string, name: string): Promise<string> {
+  if (!(await pathExists(joinPath(dir, name)))) return joinPath(dir, name);
+  const dot = name.lastIndexOf(".");
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  const ext = dot > 0 ? name.slice(dot) : "";
+  for (let i = 1; i < 1000; i++) {
+    const candidate = joinPath(dir, `${stem} copy${i > 1 ? ` ${i}` : ""}${ext}`);
+    if (!(await pathExists(candidate))) return candidate;
+  }
+  throw new Error(`Couldn't find a free name for "${name}".`);
+}
+
+async function copyRecursive(src: string, dest: string): Promise<void> {
+  let entries: DirEntry[] | undefined;
+  try {
+    entries = await readDir(src);
+  } catch {
+    entries = undefined; // not a directory
+  }
+  if (!entries) {
+    await copyFile(src, dest);
+    return;
+  }
+  await mkdir(dest, { recursive: true });
+  for (const e of entries) {
+    await copyRecursive(joinPath(src, e.name), joinPath(dest, e.name));
+  }
+}
+
+/** Copies a file or folder from anywhere (e.g. dropped from Finder) into `destDir`, never overwriting. Returns the new path. */
+export async function copyIntoDir(src: string, destDir: string): Promise<string> {
+  if (isSameOrDescendant(destDir, src)) {
+    throw new Error(`Can't copy "${baseName(src)}" into itself.`);
+  }
+  const target = await uniqueNameIn(destDir, baseName(src));
+  await copyRecursive(src, target);
+  return target;
+}
+
+/** Moves a file or folder to the OS Trash / Recycle Bin (recoverable), via the Rust side. */
+export async function moveToTrash(path: string): Promise<void> {
+  await invoke("move_to_trash", { path });
 }
